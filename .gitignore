@@ -1,0 +1,27 @@
+# generierte Reisedaten (privat – niemals hochladen)
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Secrets / lokale Umgebung
+.env
+*.token
+
+# IDE / Editor
+.idea/
+.vscode/
+.cursor/
+.history/
+.claude/settings.local.json
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Betriebssystem
+.DS_Store
+Thumbs.db
+desktop.ini

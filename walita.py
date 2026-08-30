@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 besuka97
+"""Einstiegspunkt: Träwelling-Statuses laden und HTML-Dashboard bauen.
+
+Führt nacheinander `download_statuses` und `build_dashboard` aus (Defaults unter
+`data/`). Typische Nutzung:
+
+    python3 walita.py                 # Export + Dashboard, öffnet im Browser
+    python3 walita.py --login         # OAuth-Login, dann Export + Dashboard
+    python3 walita.py --since 2026-01-01  # nur Fahrten nach diesem Datum
+    python3 walita.py --no-open       # ohne Browser
+    python3 walita.py --demo          # Demo aus examples/ (kein Token nötig)
+    python3 walita.py --dashboard-only  # nur Dashboard neu erzeugen aus vorhandener data/
+"""
+
+import argparse
+import os
+import sys
+
+import build_dashboard
+import download_statuses
+from version import __version__
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Details zu einzelnen Schritten: download_statuses.py / build_dashboard.py --help",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"walita {__version__}",
+        help="Version ausgeben und beenden.",
+    )
+
+    auth = parser.add_argument_group("Anmeldung")
+    auth.add_argument(
+        "--token",
+        default=os.environ.get("TRWL_TOKEN"),
+        help="Personal Access Token (sonst Env TRWL_TOKEN).",
+    )
+    auth.add_argument(
+        "--login", action="store_true",
+        help="OAuth-Login im Browser erzwingen (Scope read-statuses).",
+    )
+    auth.add_argument(
+        "--logout", action="store_true",
+        help="Gespeichertes OAuth-Token löschen und beenden.",
+    )
+    auth.add_argument(
+        "--client-id", default=os.environ.get("TRWL_CLIENT_ID"),
+        help="Optional eigene OAuth-Client-ID (Default steht in auth.py).",
+    )
+    auth.add_argument(
+        "--redirect-uri", default=os.environ.get("TRWL_REDIRECT_URI"),
+        help="Optional eigener OAuth-Redirect (Default: Loopback in auth.py).",
+    )
+    auth.add_argument(
+        "--manual", action="store_true",
+        help="OAuth-Code manuell einfügen (z.B. unter WSL).",
+    )
+    auth.add_argument(
+        "--oauth-token-file", default="data/oauth_token.json",
+        help="Ablageort des OAuth-Tokens (Default: data/oauth_token.json).",
+    )
+
+    export = parser.add_argument_group("Export")
+    export.add_argument(
+        "--limit", type=int, default=None,
+        help="Max. Anzahl Statuses (zum Testen).",
+    )
+    export.add_argument(
+        "--since", metavar="YYYY-MM-DD", default="",
+        help="Nur Statuses mit Abfahrt strikt nach diesem Tag "
+             "(z.B. --since 2026-01-01: alles ab dem 02.01.2026).",
+    )
+    export.add_argument(
+        "--skip-trips", action="store_true",
+        help="Keine Zwischenhalte nachladen.",
+    )
+    export.add_argument(
+        "--refresh-trips", action="store_true",
+        help="Trip-Cache ignorieren, alle Trips neu laden.",
+    )
+    export.add_argument(
+        "--refresh-stations", action="store_true",
+        help="Stations-Cache ignorieren, Koordinaten neu auflösen.",
+    )
+    export.add_argument(
+        "--no-stations", action="store_true",
+        help="Keine stations.json schreiben.",
+    )
+    export.add_argument(
+        "--operator-replacements", default="operator_replacements.json",
+        help="JSON mit Operator-Namen-Ersetzungen (Default: operator_replacements.json).",
+    )
+
+    dash = parser.add_argument_group("Dashboard")
+    dash.add_argument(
+        "--open", action="store_true", default=True,
+        help="Dashboard nach dem Bau im Browser öffnen (Default).",
+    )
+    dash.add_argument(
+        "--no-open", action="store_false", dest="open",
+        help="Dashboard nicht im Browser öffnen.",
+    )
+    dash.add_argument(
+        "--ignore-plus", action="store_true",
+        help="Wagennummern-Tags nicht am '+' trennen.",
+    )
+
+    mode = parser.add_argument_group("Modus")
+    # Beide Modi überspringen den Export – gemeinsam angegeben wäre unklar, welcher gilt.
+    mode_excl = mode.add_mutually_exclusive_group()
+    mode_excl.add_argument(
+        "--demo", action="store_true",
+        help="Nur Dashboard aus examples/ bauen (kein API-Download, kein Token).",
+    )
+    mode_excl.add_argument(
+        "--dashboard-only", action="store_true",
+        help="Export überspringen, Dashboard aus vorhandener data/ bauen.",
+    )
+
+    args = parser.parse_args(argv)
+
+    # --demo und --dashboard-only laden nichts von der API; Anmelde- und Export-Flags
+    # hätten dort keine Wirkung. Lieber abbrechen als stillschweigend ignorieren.
+    # Verglichen wird gegen den Default, damit gesetzte Env-Vars (TRWL_TOKEN etc.)
+    # nicht als bewusste Angabe zählen.
+    skip_export = args.demo or args.dashboard_only
+    if skip_export:
+        ignored = [
+            flag for flag, dest in (
+                ("--token", "token"), ("--login", "login"),
+                ("--client-id", "client_id"), ("--redirect-uri", "redirect_uri"),
+                ("--manual", "manual"), ("--limit", "limit"), ("--since", "since"),
+                ("--skip-trips", "skip_trips"), ("--refresh-trips", "refresh_trips"),
+                ("--refresh-stations", "refresh_stations"),
+                ("--no-stations", "no_stations"),
+                ("--operator-replacements", "operator_replacements"),
+                ("--oauth-token-file", "oauth_token_file"),
+            )
+            if getattr(args, dest) != parser.get_default(dest)
+        ]
+        if ignored:
+            active = "--demo" if args.demo else "--dashboard-only"
+            parser.error(
+                f"{active} lädt nichts von der API – {', '.join(ignored)} "
+                f"hätte keine Wirkung. Flag(s) weglassen oder {active} entfernen."
+            )
+
+    if args.logout:
+        return download_statuses.main(
+            ["--logout", "--oauth-token-file", args.oauth_token_file]
+        )
+
+    if args.demo:
+        dash_argv = [
+            "--statuses", "examples/statuses.json",
+            "--stations", "examples/stations.json",
+            "-o", "data/dashboard.html",
+        ]
+        if args.open:
+            dash_argv.append("--open")
+        if args.ignore_plus:
+            dash_argv.append("--ignore-plus")
+        return build_dashboard.main(dash_argv)
+
+    if not args.dashboard_only:
+        dl_argv = []
+        if args.token:
+            dl_argv.extend(["--token", args.token])
+        if args.login:
+            dl_argv.append("--login")
+        if args.client_id:
+            dl_argv.extend(["--client-id", args.client_id])
+        if args.redirect_uri:
+            dl_argv.extend(["--redirect-uri", args.redirect_uri])
+        if args.manual:
+            dl_argv.append("--manual")
+        dl_argv.extend(["--oauth-token-file", args.oauth_token_file])
+        if args.limit is not None:
+            dl_argv.extend(["--limit", str(args.limit)])
+        if args.since:
+            dl_argv.extend(["--since", args.since])
+        if args.skip_trips:
+            dl_argv.append("--skip-trips")
+        if args.refresh_trips:
+            dl_argv.append("--refresh-trips")
+        if args.refresh_stations:
+            dl_argv.append("--refresh-stations")
+        if args.no_stations:
+            dl_argv.append("--no-stations")
+        dl_argv.extend(["--operator-replacements", args.operator_replacements])
+
+        rc = download_statuses.main(dl_argv)
+        if rc:
+            return rc
+
+    dash_argv = []
+    if args.open:
+        dash_argv.append("--open")
+    if args.ignore_plus:
+        dash_argv.append("--ignore-plus")
+    return build_dashboard.main(dash_argv)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("Abgebrochen.", file=sys.stderr, flush=True)
+        sys.exit(130)

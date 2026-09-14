@@ -41,6 +41,8 @@ TRIP_REQUEST_DELAY = 0.15
 # Mehr IDs wertet /stopovers pro Anfrage nicht aus; überzählige fallen still weg.
 STOPOVER_BATCH = 50
 MAX_RETRIES = 4
+# Station-Identifier (IBNR, DHID/IFOPT, MOTIS, …) an Stopovers und GET /station/{id}.
+WITH_IDENTIFIERS = {"withIdentifiers": "true"}
 
 
 def log(msg):
@@ -99,6 +101,17 @@ def api_get(path_or_url, token, params=None):
     raise ApiError(None, f"Maximale Versuche erschöpft: {last_error}")
 
 
+def url_with_query(path_or_url, extra):
+    """Hängt Query-Parameter an einen Pfad oder eine volle URL an (gleiche Keys werden überschrieben)."""
+    parts = urllib.parse.urlsplit(path_or_url)
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    query.update(extra)
+    return urllib.parse.urlunsplit((
+        parts.scheme, parts.netloc, parts.path,
+        urllib.parse.urlencode(query), parts.fragment,
+    ))
+
+
 class ApiError(Exception):
     def __init__(self, code, body):
         self.code = code
@@ -141,7 +154,9 @@ def iter_statuses(username, token, limit=None, since=None):
     """
     count = 0
     skipped = 0
-    next_url = f"/user/{urllib.parse.quote(username)}/statuses"
+    next_url = url_with_query(
+        f"/user/{urllib.parse.quote(username)}/statuses", WITH_IDENTIFIERS
+    )
     page = 0
     while next_url:
         page += 1
@@ -157,6 +172,8 @@ def iter_statuses(username, token, limit=None, since=None):
             if limit and count >= limit:
                 return
         next_url = payload.get("links", {}).get("next")
+        if next_url:
+            next_url = url_with_query(next_url, WITH_IDENTIFIERS)
     if since:
         log(f"Datumsfilter (> {since}): {count} behalten, {skipped} übersprungen.")
 
@@ -165,7 +182,8 @@ def fetch_stopovers(trip_ids, token, cache):
     """Holt die Stopovers zu mehreren Trip-IDs und legt sie in `cache` ab.
 
     `cache` bildet `trip_id -> (stopovers, error)`; bereits enthaltene IDs werden
-    übersprungen. Jeder Stopover trägt ein `station`-Objekt mit Koordinaten.
+    übersprungen. Jeder Stopover trägt ein `station`-Objekt mit Koordinaten;
+    Identifier kommen mit, wenn die API `withIdentifiers` am Endpoint auswertet.
     """
     todo = []
     for raw in trip_ids:
@@ -178,7 +196,9 @@ def fetch_stopovers(trip_ids, token, cache):
 
     for i in range(0, len(todo), STOPOVER_BATCH):
         batch = todo[i:i + STOPOVER_BATCH]
-        path = "/stopovers/" + ",".join(str(t) for t in batch)
+        path = url_with_query(
+            "/stopovers/" + ",".join(str(t) for t in batch), WITH_IDENTIFIERS
+        )
         try:
             data = api_get(path, token).get("data") or {}
         except ApiError as e:
@@ -382,21 +402,41 @@ def load_station_cache(path):
                 continue
         cache[sid] = entry
     cached_coords = sum(1 for e in cache.values() if e.get("latitude") is not None)
+    cached_ids = sum(1 for e in cache.values() if isinstance(e.get("identifiers"), list))
     log(f"Stations-Cache: {len(cache)} Stationen geladen "
-        f"({cached_coords} mit Koordinaten) aus {path}.")
+        f"({cached_coords} mit Koordinaten, {cached_ids} mit Identifiers) aus {path}.")
     return cache
 
 
-def resolve_stations(statuses, token, cache=None):
-    """Baut eine Map station_id -> {id, name, latitude, longitude}.
+def _station_ident_summary(stations):
+    """Zählt Identifier-Typen über alle Stationen (für die Log-Zeile)."""
+    types = {}
+    with_ids = 0
+    for entry in stations.values():
+        idents = entry.get("identifiers")
+        if not isinstance(idents, list) or not idents:
+            continue
+        with_ids += 1
+        for ident in idents:
+            if not isinstance(ident, dict):
+                continue
+            kind = ident.get("type") or "?"
+            types[kind] = types.get(kind, 0) + 1
+    return with_ids, types
 
-    Koordinaten kommen gratis aus dem `station`-Objekt jedes Stopovers; nur was
-    dort fehlt, wird per `GET /station/{id}` nachgeladen. Es werden *alle* Halte
-    der kompletten Trip-Route berücksichtigt (nicht nur das befahrene Teilstück);
-    bei Status ohne auflösbaren Trip fällt es auf Start/Ziel des Checkins zurück.
+
+def resolve_stations(statuses, token, cache=None):
+    """Baut eine Map station_id -> {id, name, latitude, longitude, identifiers}.
+
+    Koordinaten kommen gratis aus dem `station`-Objekt jedes Stopovers; Identifier
+    (IBNR, DHID/IFOPT, MOTIS, …) nur, wenn die API sie mitliefert. Was fehlt,
+    wird per `GET /station/{id}?withIdentifiers=true` nachgeladen. Es werden
+    *alle* Halte der kompletten Trip-Route berücksichtigt (nicht nur das
+    befahrene Teilstück); bei Status ohne auflösbaren Trip fällt es auf
+    Start/Ziel des Checkins zurück.
 
     `cache` seedet die Map mit bereits aufgelösten Stationen (siehe
-    `load_station_cache`), damit deren Koordinaten nicht erneut per
+    `load_station_cache`), damit Koordinaten und Identifier nicht erneut per
     `GET /station/{id}` geholt werden müssen.
     """
     stations = dict(cache) if cache else {}
@@ -405,18 +445,22 @@ def resolve_stations(statuses, token, cache=None):
         sid = station.get("id")
         if sid is None:
             return
-        existing = stations.get(sid)
-        if existing and existing.get("latitude") is not None:
-            return
+        existing = stations.get(sid) or {}
         entry = {
             "id": sid,
-            "name": station.get("name"),
-            "latitude": station.get("latitude") if with_coords else None,
-            "longitude": station.get("longitude") if with_coords else None,
+            "name": station.get("name") or existing.get("name"),
+            "latitude": existing.get("latitude"),
+            "longitude": existing.get("longitude"),
         }
-        if existing and entry["latitude"] is None:
-            entry["latitude"] = existing.get("latitude")
-            entry["longitude"] = existing.get("longitude")
+        if with_coords:
+            if entry["latitude"] is None:
+                entry["latitude"] = station.get("latitude")
+            if entry["longitude"] is None:
+                entry["longitude"] = station.get("longitude")
+        if isinstance(existing.get("identifiers"), list):
+            entry["identifiers"] = existing["identifiers"]
+        elif isinstance(station.get("identifiers"), list):
+            entry["identifiers"] = station["identifiers"]
         stations[sid] = entry
 
     needed = set()
@@ -437,23 +481,103 @@ def resolve_stations(statuses, token, cache=None):
             if st.get("id") is not None:
                 needed.add(st["id"])
 
-    missing = [sid for sid in needed if stations.get(sid, {}).get("latitude") is None]
-    log(f"Stationen: {len(needed)} im Einsatz, {len(missing)} Koordinaten nachzuladen.")
+    missing = [
+        sid for sid in (needed | set(stations))
+        if stations.get(sid, {}).get("latitude") is None
+        or not isinstance(stations.get(sid, {}).get("identifiers"), list)
+    ]
+    log(f"Stationen: {len(needed)} im Einsatz, {len(missing)} nachzuladen "
+        f"(Koordinaten und/oder Identifier).")
     for i, sid in enumerate(missing, 1):
+        existing = stations.get(sid) or {}
         try:
-            data = api_get(f"/station/{sid}", token).get("data", {})
+            data = api_get(
+                url_with_query(f"/station/{sid}", WITH_IDENTIFIERS), token
+            ).get("data", {})
+            idents = data.get("identifiers")
             stations[sid] = {
                 "id": sid,
-                "name": data.get("name") or stations.get(sid, {}).get("name"),
-                "latitude": data.get("latitude"),
-                "longitude": data.get("longitude"),
+                "name": data.get("name") or existing.get("name"),
+                "latitude": data.get("latitude")
+                if data.get("latitude") is not None else existing.get("latitude"),
+                "longitude": data.get("longitude")
+                if data.get("longitude") is not None else existing.get("longitude"),
+                "identifiers": idents if isinstance(idents, list) else [],
             }
         except ApiError as e:
             log(f"  Station {sid} nicht auflösbar: {e}")
+            # 404: Station gibt es nicht mehr – leere Liste merken, nicht jedes Mal neu fragen.
+            # Andere Fehler (429, 5xx): Schlüssel weglassen, nächster Lauf versucht es erneut.
+            if e.code == 404:
+                stations[sid] = {
+                    "id": sid,
+                    "name": existing.get("name"),
+                    "latitude": existing.get("latitude"),
+                    "longitude": existing.get("longitude"),
+                    "identifiers": [],
+                }
         if i % 25 == 0 or i == len(missing):
             log(f"  Stationen: {i}/{len(missing)}")
         time.sleep(TRIP_REQUEST_DELAY)
     return stations
+
+
+def _station_entry(stations, sid):
+    """Lookup in der Stations-Map; JSON-IDs können int oder str sein."""
+    if sid is None:
+        return None
+    entry = stations.get(sid)
+    if entry is not None:
+        return entry
+    try:
+        return stations.get(int(sid))
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_identifiers_to_stopover(st, stations):
+    """Schreibt die Identifier-Liste auf Stopover und verschachteltes station-Objekt."""
+    if not isinstance(st, dict):
+        return
+    station = st.get("station") if isinstance(st.get("station"), dict) else None
+    sid = (station or {}).get("id")
+    if sid is None:
+        sid = st.get("id")
+    entry = _station_entry(stations, sid)
+    if not entry:
+        return
+    idents = entry.get("identifiers")
+    if not isinstance(idents, list):
+        return
+    st["identifiers"] = idents
+    if station is not None:
+        station["identifiers"] = idents
+
+
+def apply_identifiers_to_statuses(statuses, stations):
+    """Kopiert Identifier aus der Stations-Map in Check-in- und Trip-Stopovers.
+
+    Die Status-Liste und `/stopovers` liefern Identifier nicht mit. Sie kommen
+    von `GET /station/{id}?withIdentifiers=true` und werden hier auf Origin,
+    Destination und Zwischenhalte geschrieben, damit statuses.json denselben
+    Stand hat wie stations.json.
+    """
+    for status in statuses:
+        checkin = status.get("checkin") or {}
+        _apply_identifiers_to_stopover(checkin.get("origin"), stations)
+        _apply_identifiers_to_stopover(checkin.get("destination"), stations)
+        trip = status.get("trip") or {}
+        for st in trip.get("stopovers") or []:
+            _apply_identifiers_to_stopover(st, stations)
+
+
+def apply_identifiers_to_trip_cache(cache, stations):
+    """Schreibt Identifier in alle Stopovers des Trip-Caches (trips.json)."""
+    for stopovers, err in cache.values():
+        if err or not isinstance(stopovers, list):
+            continue
+        for st in stopovers:
+            _apply_identifiers_to_stopover(st, stations)
 
 
 def ensure_parent_dir(path):
@@ -588,7 +712,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--refresh-stations", action="store_true",
-        help="Vorhandene stations.json nicht als Cache nutzen, alle Stationen neu auflösen.",
+        help="Vorhandene stations.json nicht als Cache nutzen, Koordinaten und "
+             "Identifier neu auflösen.",
     )
     parser.add_argument(
         "--trips-output", default="data/trips.json",
@@ -661,6 +786,7 @@ def main(argv=None):
         return 1
     log(f"Insgesamt {len(statuses)} Statuses geladen.")
 
+    trip_cache = None
     if not args.skip_trips:
         if args.refresh_trips:
             cache = {}
@@ -693,6 +819,8 @@ def main(argv=None):
                 "mit PAT: Token inkl. read-statuses neu ausstellen."
             )
 
+        trip_cache = cache
+
     # Operator-Namen vereinheitlichen (manuelle Mapping-Datei, vor dem Schreiben).
     try:
         replacements = load_operator_replacements(args.operator_replacements)
@@ -708,6 +836,15 @@ def main(argv=None):
     elif os.path.isfile(args.operator_replacements):
         log(f"Operator-Ersetzungen: {args.operator_replacements} enthält keine Regeln.")
 
+    stations = None
+    if not args.skip_trips and not args.no_stations:
+        station_cache = {} if args.refresh_stations else load_station_cache(args.stations_output)
+        stations = resolve_stations(statuses, token, cache=station_cache)
+        apply_identifiers_to_statuses(statuses, stations)
+        if trip_cache is not None:
+            apply_identifiers_to_trip_cache(trip_cache, stations)
+            save_trip_cache(args.trips_output, trip_cache)
+
     try:
         ensure_parent_dir(args.output)
         with open(args.output, "w", encoding="utf-8") as f:
@@ -717,9 +854,7 @@ def main(argv=None):
         return 1
     log(f"Geschrieben: {args.output} ({len(statuses)} Statuses)")
 
-    if not args.skip_trips and not args.no_stations:
-        cache = {} if args.refresh_stations else load_station_cache(args.stations_output)
-        stations = resolve_stations(statuses, token, cache=cache)
+    if stations is not None:
         try:
             ensure_parent_dir(args.stations_output)
             with open(args.stations_output, "w", encoding="utf-8") as f:
@@ -728,8 +863,12 @@ def main(argv=None):
             log(f"Fehler: {args.stations_output} nicht schreibbar ({e}).")
             return 1
         with_coords = sum(1 for s in stations.values() if s.get("latitude") is not None)
+        with_ids, ident_types = _station_ident_summary(stations)
+        type_bits = ", ".join(
+            f"{k}={v}" for k, v in sorted(ident_types.items())
+        ) or "keine"
         log(f"Geschrieben: {args.stations_output} ({len(stations)} Stationen, "
-            f"{with_coords} mit Koordinaten)")
+            f"{with_coords} mit Koordinaten, {with_ids} mit Identifiers: {type_bits})")
     return 0
 
 

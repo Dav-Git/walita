@@ -137,7 +137,7 @@ class EntityAgg:
     __slots__ = (
         "count", "distance_km", "duration_min", "points", "segments",
         "delay_sum", "delay_n", "on_time",
-        "first", "last",
+        "first", "last", "dates",
         "min_distance_km", "max_distance_km", "min_route", "max_route",
         "vehicles", "loc_classes", "lines", "routes", "weekdays", "months",
         "loc_class_counts",
@@ -154,6 +154,7 @@ class EntityAgg:
         self.on_time = 0
         self.first = None
         self.last = None
+        self.dates = set()
         self.min_distance_km = None
         self.max_distance_km = None
         self.min_route = ""
@@ -180,6 +181,7 @@ class EntityAgg:
             if delay <= 5:
                 self.on_time += 1
         if date_str:
+            self.dates.add(date_str)
             if self.first is None or date_str < self.first:
                 self.first = date_str
             if self.last is None or date_str > self.last:
@@ -260,7 +262,7 @@ class EdgeAgg:
     """Akkumulator für eine gerichtete Segmentkante (fromId → toId)."""
 
     __slots__ = (
-        "from_name", "to_name", "count", "first", "last",
+        "from_name", "to_name", "count", "first", "last", "dates",
         "vehicles", "lines", "loc_classes",
     )
 
@@ -270,6 +272,7 @@ class EdgeAgg:
         self.count = 0
         self.first = None
         self.last = None
+        self.dates = set()
         self.vehicles = set()
         self.lines = set()
         self.loc_classes = set()
@@ -277,6 +280,7 @@ class EdgeAgg:
     def add(self, date_str, *, line="", loc_class="", vehicles=None):
         self.count += 1
         if date_str:
+            self.dates.add(date_str)
             if self.first is None or date_str < self.first:
                 self.first = date_str
             if self.last is None or date_str > self.last:
@@ -305,7 +309,10 @@ class EdgeAgg:
 class StationAgg:
     """Akkumulator für Stationen: Einstieg / Ausstieg / Durchfahrt."""
 
-    __slots__ = ("name", "boarded", "alighted", "through", "first", "last", "lines")
+    __slots__ = (
+        "name", "boarded", "alighted", "through", "first", "last", "dates", "lines",
+        "first_used", "dates_used", "first_through", "dates_through",
+    )
 
     def __init__(self, name=""):
         self.name = name or ""
@@ -314,10 +321,16 @@ class StationAgg:
         self.through = 0
         self.first = None
         self.last = None
+        self.dates = set()
         self.lines = set()
+        self.first_used = None
+        self.dates_used = set()
+        self.first_through = None
+        self.dates_through = set()
 
     def _touch(self, date_str, line=""):
         if date_str:
+            self.dates.add(date_str)
             if self.first is None or date_str < self.first:
                 self.first = date_str
             if self.last is None or date_str > self.last:
@@ -325,17 +338,34 @@ class StationAgg:
         if line:
             self.lines.add(line)
 
+    def _touch_used(self, date_str):
+        if not date_str:
+            return
+        self.dates_used.add(date_str)
+        if self.first_used is None or date_str < self.first_used:
+            self.first_used = date_str
+
+    def _touch_through(self, date_str):
+        if not date_str:
+            return
+        self.dates_through.add(date_str)
+        if self.first_through is None or date_str < self.first_through:
+            self.first_through = date_str
+
     def add_boarded(self, date_str, line=""):
         self.boarded += 1
         self._touch(date_str, line)
+        self._touch_used(date_str)
 
     def add_alighted(self, date_str, line=""):
         self.alighted += 1
         self._touch(date_str, line)
+        self._touch_used(date_str)
 
     def add_through(self, date_str, line=""):
         self.through += 1
         self._touch(date_str, line)
+        self._touch_through(date_str)
 
     def to_row(self):
         return {
@@ -353,17 +383,19 @@ class StationAgg:
 class DatedCombo:
     """Zähler mit first/last für Kombi-Listen (Fahrzeug×Kante×…)."""
 
-    __slots__ = ("count", "first", "last", "lines")
+    __slots__ = ("count", "first", "last", "dates", "lines")
 
     def __init__(self):
         self.count = 0
         self.first = None
         self.last = None
+        self.dates = set()
         self.lines = set()
 
     def add(self, date_str, line=""):
         self.count += 1
         if date_str:
+            self.dates.add(date_str)
             if self.first is None or date_str < self.first:
                 self.first = date_str
             if self.last is None or date_str > self.last:
@@ -483,11 +515,75 @@ def traveled_stopovers(status):
     return stopovers[i_start : i_end + 1]
 
 
-def build_data(statuses, stations, ignore_plus=False):
+def load_loc_class_families(path):
+    """Liest die manuelle Baureihe→Familie-Zuordnung.
+
+    JSON-Objekt-Syntax, in der derselbe Schlüssel mehrfach vorkommen darf
+    (eine Baureihe in mehreren Familien). `json.load` würde sonst nur den
+    letzten Wert behalten, daher `object_pairs_hook`. Schlüssel mit
+    führendem '_' werden übersprungen. Fehlt die Datei, wird {} zurückgegeben.
+
+    Rückgabe: {Baureihe: [Familie, ...]} in Dateireihenfolge, ohne
+    doppelte Familie je Baureihe.
+    """
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            pairs = json.load(f, object_pairs_hook=list)
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Baureihenfamilien {path} nicht lesbar: {e}") from e
+    if not isinstance(pairs, list):
+        raise ValueError(
+            f"Baureihenfamilien {path}: erwartet ein Objekt "
+            f"{{Baureihe: Familie}}, bekommen {type(pairs).__name__}."
+        )
+
+    out = {}
+    for item in pairs:
+        if not (isinstance(item, (list, tuple)) and len(item) == 2):
+            raise ValueError(
+                f"Baureihenfamilien {path}: ungültiger Eintrag {item!r}."
+            )
+        key, value = item
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"Baureihenfamilien {path}: Wert für {key!r} muss "
+                f"ein nicht-leerer String sein."
+            )
+        families = out.setdefault(key, [])
+        if value not in families:
+            families.append(value)
+    return out
+
+
+def pack_loc_class_families(mapping, variants):
+    """Invertiert Baureihe→Familie(n) zu Familie→[Baureihen], nur Treffer in variants."""
+    if not mapping:
+        return {}
+    present = {v[1] for v in variants if len(v) > 1 and v[1]}
+    members = {}
+    for loc_class, families in mapping.items():
+        if loc_class not in present:
+            continue
+        if isinstance(families, str):
+            families = [families]
+        for family in families:
+            bucket = members.setdefault(family, [])
+            if loc_class not in bucket:
+                bucket.append(loc_class)
+    return {fam: sorted(cls) for fam, cls in sorted(members.items())}
+
+
+def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
     """Berechnet KPIs, Tabellenzeilen und Kanten für das Dashboard.
 
     `ignore_plus`: wenn True, werden Wagennummern-Tags nicht am '+' getrennt
     (Doppeltraktion wie "463001+463501" bleibt ein Fahrzeug); Standard trennt.
+    `loc_class_families`: optionales Mapping Baureihe → [Familie, ...] für den
+    Kartenfilter (nur Familien mit mindestens einem Treffer in den Daten).
     """
     total_distance_m = 0
     total_duration_min = 0
@@ -508,11 +604,13 @@ def build_data(statuses, stations, ignore_plus=False):
     # zu einer variants-Liste dedupliziert, damit das JSON kompakt bleibt.
     edge_lc = Counter()            # (id_from, id_to, *variant) -> Anzahl
     node_lc = Counter()            # (station_id, *variant) -> Befahrungen
+    node_lc_used = Counter()       # (station_id, *variant) -> Ein-/Ausstiege
     # Fahrzeug-Buckets separat: Mehrfachwagen würden in der Variante beim
     # Aufsummieren von "Alle" doppelt zählen. Bei Fahrzeug-Filter greift JS
     # auf diese Buckets zu; ohne Filter bleiben edge_lc/node_lc maßgeblich.
     edge_veh = Counter()           # (id_from, id_to, veh_key, *variant) -> Anzahl
     node_veh = Counter()           # (station_id, veh_key, *variant) -> Befahrungen
+    node_veh_used = Counter()      # (station_id, veh_key, *variant) -> Ein-/Ausstiege
 
     # Statistik-Akkumulatoren (Linie / Baureihe / Fahrzeug + Kreuztabellen).
     line_aggs = {}
@@ -657,6 +755,12 @@ def build_data(statuses, stations, ignore_plus=False):
                 node_lc[(sid, *variant)] += 1
                 for vk in veh_keys:
                     node_veh[(sid, vk, *variant)] += 1
+        def mark_used_node(sid):
+            """Ein-/Ausstieg dieser Fahrt für die Karten-Marker (filtertreu)."""
+            node_lc_used[(sid, *variant)] += 1
+            for vk in veh_keys:
+                node_veh_used[(sid, vk, *variant)] += 1
+
         # Station-Rollen: Einstieg = segment[0], Ausstieg = segment[-1],
         # Durchfahrt = Zwischenhalte (pro Fahrt je Station-ID einmal).
         # len==1: dieselbe Station zählt als Ein und Aus, nicht als Durchfahrt.
@@ -667,6 +771,7 @@ def build_data(statuses, stations, ignore_plus=False):
                 get_station(
                     sid0, s0.get("name") or edge_names.get(sid0) or str(sid0)
                 ).add_boarded(date_str, line=lk)
+                mark_used_node(sid0)
                 if lk:
                     _get_dated(station_line, (sid0, lk)).add(date_str)
             if len(segment) == 1:
@@ -679,6 +784,8 @@ def build_data(statuses, stations, ignore_plus=False):
                     get_station(
                         sidn, sn.get("name") or edge_names.get(sidn) or str(sidn)
                     ).add_alighted(date_str, line=lk)
+                    if sidn != sid0:
+                        mark_used_node(sidn)
                     if lk:
                         _get_dated(station_line, (sidn, lk)).add(date_str)
                 seen_through = set()
@@ -724,6 +831,7 @@ def build_data(statuses, stations, ignore_plus=False):
         # Detail-Stopovers für die Tabelle
         detail = [
             {
+                "id": s.get("id"),
                 "name": s.get("name"),
                 "arrivalPlanned": s.get("arrivalPlanned"),
                 "arrivalReal": s.get("arrivalReal"),
@@ -741,11 +849,21 @@ def build_data(statuses, stations, ignore_plus=False):
             {
                 "date": dep,
                 "line": lk,
+                "operator": operator,
                 "category": checkin.get("category") or "",
                 "locClass": loc_class,
                 "vehicles": ", ".join(veh_numbers),
                 "from": origin.get("name") or "",
                 "to": destination.get("name") or "",
+                "depPlanned": origin.get("departurePlanned") or None,
+                "depReal": origin.get("departureReal")
+                or checkin.get("manualDeparture")
+                or None,
+                "arrPlanned": destination.get("arrivalPlanned") or None,
+                "arrReal": destination.get("arrivalReal")
+                or checkin.get("manualArrival")
+                or None,
+                "viaStops": max(0, len(segment) - 2),
                 "distanceKm": round(distance / 1000, 1),
                 "durationMin": duration,
                 "delay": delay_minutes(
@@ -871,8 +989,7 @@ def build_data(statuses, stations, ignore_plus=False):
             )
             if lk:
                 _get_dated(line_vehicle, (lk, num)).add(date_str)
-            if loc_class:
-                _get_dated(vehicle_loc, (num, loc_class)).add(date_str)
+            _get_dated(vehicle_loc, (num, loc_class or "")).add(date_str)
 
         # Fahrzeug-Datensätze aus den Träwelling-Tags (sofern vorhanden).
         # loc_class und veh_numbers sind oben schon ermittelt.
@@ -952,7 +1069,7 @@ def build_data(statuses, stations, ignore_plus=False):
         if c is None:
             continue
         map_stations[str(sid)] = c
-        map_nodes.append([sid, variant_id(key[1:]), cnt])
+        map_nodes.append([sid, variant_id(key[1:]), cnt, node_lc_used.get(key, 0)])
 
     # Fahrzeug-Liste + Kanten/Knoten mit Fahrzeug-Index (für Karten-Filter).
     map_vehicles = []  # [locClass, number]
@@ -985,7 +1102,9 @@ def build_data(statuses, stations, ignore_plus=False):
         if c is None:
             continue
         map_stations[str(sid)] = c
-        map_veh_nodes.append([sid, variant_id(key[2:]), vehicle_id(vk), cnt])
+        map_veh_nodes.append(
+            [sid, variant_id(key[2:]), vehicle_id(vk), cnt, node_veh_used.get(key, 0)]
+        )
 
     dates.sort()
     kpis = {
@@ -1224,91 +1343,163 @@ def build_data(statuses, stations, ignore_plus=False):
         "multiVehicleEdges": multi_vehicle_edges,
     }
 
-    # --- Tagesziele: Erstvorkommen je Kalendertag ---
+    # --- Tagesziele: Erstvorkommen und Wiederholungen je Kalendertag ---
     daily_firsts = {}
+    daily_repeats = {}
 
-    def _push_first(date_str, bucket, row):
+    def _push_day(store, date_str, bucket, row):
         if not date_str:
             return
-        day = daily_firsts.setdefault(date_str, {})
+        day = store.setdefault(date_str, {})
         day.setdefault(bucket, []).append(row)
+
+    def _emit_dated(dates, first, bucket, row):
+        _push_day(daily_firsts, first, bucket, row)
+        for d in dates or ():
+            if d and d != first:
+                _push_day(daily_repeats, d, bucket, row)
 
     for k, a in line_aggs.items():
         if k and a.first:
-            _push_first(a.first, "lines", {"key": k})
+            _emit_dated(a.dates, a.first, "lines", {"key": k})
     for k, a in loc_aggs.items():
         if k and a.first:
-            _push_first(a.first, "locClasses", {"key": k})
-    for k, a in veh_aggs.items():
-        if not k or not a.first:
+            _emit_dated(a.dates, a.first, "locClasses", {"key": k})
+    for (num, loc), c in vehicle_loc.items():
+        if not num or not c.first:
             continue
-        row = {"key": k}
-        if a.loc_class_counts:
-            row["locClass"] = a.loc_class_counts.most_common(1)[0][0]
-        _push_first(a.first, "vehicles", row)
+        row = {"key": num}
+        if loc:
+            row["locClass"] = loc
+        _emit_dated(c.dates, c.first, "vehicles", row)
     for e in edge_aggs.values():
         if e.first:
-            _push_first(e.first, "edges", {"from": e.from_name, "to": e.to_name})
+            _emit_dated(
+                e.dates, e.first, "edges", {"from": e.from_name, "to": e.to_name}
+            )
     for sid, a in station_aggs.items():
-        if a.first:
-            _push_first(a.first, "stations", {"key": a.name or str(sid)})
+        name = a.name or str(sid)
+        if a.first_used:
+            _emit_dated(a.dates_used, a.first_used, "stationsUsed", {"key": name})
+        if a.first_through:
+            _emit_dated(
+                a.dates_through, a.first_through, "stationsThrough", {"key": name}
+            )
 
     for (line, veh), c in line_vehicle.items():
         if c.first:
-            _push_first(c.first, "lineVehicle", {"line": line, "vehicle": veh})
+            _emit_dated(
+                c.dates, c.first, "lineVehicle", {"line": line, "vehicle": veh}
+            )
     for (line, loc), c in line_loc.items():
         if c.first:
-            _push_first(c.first, "lineLocClass", {"line": line, "locClass": loc})
+            _emit_dated(
+                c.dates, c.first, "lineLocClass", {"line": line, "locClass": loc}
+            )
 
     for (num, a_id, b_id), c in veh_edge.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
-        _push_first(c.first, "vehEdge", {"vehicle": num, "from": fn, "to": tn})
+        _emit_dated(
+            c.dates, c.first, "vehEdge",
+            {"vehicle": num, "from": fn, "to": tn},
+        )
     for (line, a_id, b_id), c in line_edge.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
-        _push_first(c.first, "lineEdge", {"line": line, "from": fn, "to": tn})
+        _emit_dated(
+            c.dates, c.first, "lineEdge",
+            {"line": line, "from": fn, "to": tn},
+        )
     for (loc, a_id, b_id), c in loc_edge.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
-        _push_first(c.first, "locEdge", {"locClass": loc, "from": fn, "to": tn})
+        _emit_dated(
+            c.dates, c.first, "locEdge",
+            {"locClass": loc, "from": fn, "to": tn},
+        )
 
     for (sid, line), c in station_line.items():
         if not c.first:
             continue
         st = station_aggs.get(sid)
         name = (st.name if st else "") or edge_names.get(sid) or str(sid)
-        _push_first(c.first, "stationLine", {"station": name, "line": line})
+        _emit_dated(
+            c.dates, c.first, "stationLine", {"station": name, "line": line}
+        )
 
     for (num, a_id, b_id, line), c in veh_edge_line.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
-        _push_first(
-            c.first,
-            "vehEdgeLine",
+        _emit_dated(
+            c.dates, c.first, "vehEdgeLine",
             {"vehicle": num, "from": fn, "to": tn, "line": line},
         )
     for (loc, a_id, b_id, line), c in loc_edge_line.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
-        _push_first(
-            c.first,
-            "locEdgeLine",
+        _emit_dated(
+            c.dates, c.first, "locEdgeLine",
             {"locClass": loc, "from": fn, "to": tn, "line": line},
         )
+
+    # Top-Wagen der Baureihe: nur Neu, wenn ein Wagen den bisherigen Leader
+    # derselben Baureihe strikt überholt (km, dann Fahrten). Das erste Fahrzeug
+    # einer Baureihe zählt nicht — das steht schon unter „Fahrzeuge“.
+    class_stats = {}  # locClass -> {veh: [km, count]}
+    last_leader = {}  # locClass -> letzter eindeutiger Leader
+    for rec in sorted(
+        vehicle_records,
+        key=lambda r: (r.get("date") or "", r.get("depTime") or "", r.get("vehicleNumber") or ""),
+    ):
+        loc = rec.get("locClass") or ""
+        veh = rec.get("vehicleNumber") or ""
+        if not loc or not veh:
+            continue
+        veh_stats = class_stats.setdefault(loc, {})
+        km, n = veh_stats.get(veh, (0.0, 0))
+        veh_stats[veh] = (km + (rec.get("distanceKm") or 0), n + 1)
+        ranked = sorted(
+            veh_stats.items(),
+            key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]),
+        )
+        new_leader = ranked[0][0]
+        if len(ranked) > 1:
+            top_km, top_n = ranked[0][1]
+            next_km, next_n = ranked[1][1]
+            if (top_km, top_n) == (next_km, next_n):
+                new_leader = None
+        prev = last_leader.get(loc)
+        if new_leader and prev and new_leader != prev:
+            top_km, top_n = veh_stats[new_leader]
+            _push_day(
+                daily_firsts,
+                rec.get("date") or "",
+                "topVehicleInClass",
+                {
+                    "vehicle": new_leader,
+                    "locClass": loc,
+                    "prevVehicle": prev,
+                    "km": round(top_km, 1),
+                    "count": top_n,
+                },
+            )
+        if new_leader:
+            last_leader[loc] = new_leader
 
     # Stabile Sortierung innerhalb der Buckets.
     def _sort_key(row):
         return tuple(str(row.get(k, "")) for k in (
-            "key", "line", "vehicle", "locClass", "station", "from", "to"
+            "key", "line", "vehicle", "locClass", "station", "from", "to",
+            "prevVehicle",
         ))
 
-    for day_buckets in daily_firsts.values():
+    for day_buckets in list(daily_firsts.values()) + list(daily_repeats.values()):
         for bucket, rows in day_buckets.items():
             rows.sort(key=_sort_key)
 
@@ -1327,6 +1518,10 @@ def build_data(statuses, stations, ignore_plus=False):
         "segments": segment_ranking,
         "stats": stats,
         "dailyFirsts": daily_firsts,
+        "dailyRepeats": daily_repeats,
+        "locClassFamilies": pack_loc_class_families(
+            loc_class_families or {}, variants
+        ),
     }
 
 
@@ -1466,6 +1661,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ctl-checks label { display:inline-flex; align-items:center; gap:4px; color:var(--fg);
         cursor:pointer; white-space:nowrap; }
   .ctl-checks input { margin:0; accent-color:var(--accent); }
+  #tripsTable.no-delay th[data-k="delay"],
+  #tripsTable.no-delay td.delay { display:none; }
+  #tripsTable.no-route th[data-k="route"],
+  #tripsTable.no-route td.route { display:none; }
+  #tripsTable td.route { white-space:normal; max-width:28em; line-height:1.35; }
   .matrix-wrap { overflow:auto; max-height:800px; border:1px solid var(--border);
         border-radius:var(--radius); margin-bottom:24px; background:var(--panel);
         box-shadow:var(--shadow); }
@@ -1552,6 +1752,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         border:1px solid var(--border); border-radius:8px; background:var(--panel2);
         color:var(--fg); font:inherit; font-size:13px; cursor:pointer; }
   .stats-more:hover { border-color:var(--accent); background:var(--accent-soft); }
+  .toolbar-btn { margin-left:auto; background:var(--panel2); border:1px solid var(--border);
+        color:var(--fg); padding:8px 12px; border-radius:9px; cursor:pointer;
+        font:inherit; font-size:13px; }
+  .toolbar-btn:hover { border-color:var(--accent); background:var(--accent-soft); }
   .daily-nav { width:36px; height:34px; border:1px solid var(--border); border-radius:8px;
         background:var(--panel2); color:var(--fg); cursor:pointer; font-size:18px; line-height:1; }
   .daily-nav:hover { border-color:var(--accent); background:var(--accent-soft); }
@@ -1697,17 +1901,39 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <section id="trips" class="tab">
   <div class="tab-head"><h2>Fahrten</h2><p>Alle Check-ins – durchsuchbar und sortierbar.</p></div>
   <div class="toolbar">
-    <input type="search" id="filter" placeholder="Filtern (Linie, Station, Datum …)">
+    <input type="search" id="filter" placeholder="Filtern (Linie, Operator, Station, Datum …)">
+    <label class="ctl">Von <input type="date" id="tripDateFrom"></label>
+    <label class="ctl">Bis <input type="date" id="tripDateTo"></label>
+    <span class="ctl ctl-checks">
+      <label><input type="checkbox" id="tripShowDelay"> Verspätung</label>
+      <label><input type="checkbox" id="tripShowRoute"> Laufweg</label>
+    </span>
+    <label class="ctl">Zeiten
+      <select id="tripTimeMode">
+        <option value="planned">Plan</option>
+        <option value="real">Ist</option>
+      </select>
+    </label>
     <span class="muted" id="tripcount"></span>
+    <button type="button" class="toolbar-btn" id="tripsCopy">Als TSV kopieren</button>
   </div>
   <div class="panel">
     <table id="tripsTable">
       <thead><tr>
-        <th data-k="date">Datum</th><th data-k="line">Linie</th>
-        <th data-k="locClass">Baureihe</th><th data-k="vehicles">Wagen</th>
-        <th data-k="from">Von</th><th data-k="to">Nach</th>
-        <th data-k="distanceKm">km</th><th data-k="durationMin">Min</th>
-        <th data-k="delay">Versp.</th><th data-k="points">Punkte</th>
+        <th data-k="date" class="sorted" title="Sortieren">Datum</th>
+        <th data-k="line" title="Sortieren">Linie</th>
+        <th data-k="operator" title="Sortieren">Operator</th>
+        <th data-k="locClass" title="Sortieren">Baureihe</th>
+        <th data-k="vehicles" title="Sortieren">Wagen</th>
+        <th data-k="from" title="Sortieren">Von</th>
+        <th data-k="to" title="Sortieren">Nach</th>
+        <th data-k="depTime" title="Sortieren">Ab</th>
+        <th data-k="arrTime" title="Sortieren">An</th>
+        <th data-k="viaStops" title="Sortieren">Zwischenhalte</th>
+        <th data-k="route" title="Sortieren">Laufweg</th>
+        <th data-k="distanceKm" title="Sortieren">km</th>
+        <th data-k="durationMin" title="Sortieren">Min</th>
+        <th data-k="delay" title="Sortieren">Versp.</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1740,11 +1966,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <section id="daily" class="tab">
   <div class="tab-head"><h2>Tagesziele</h2>
-    <p>Was an einem Tag zum ersten Mal vorkam – Linien, Fahrzeuge, Kanten und Kombis.</p></div>
+    <p>Was an einem Tag zum ersten Mal vorkam – und was an dem Tag wiederholt befahren wurde.</p></div>
   <div class="toolbar">
-    <button type="button" class="daily-nav" id="dailyPrev" title="Vorheriger Tag mit Erstvorkommen">‹</button>
+    <button type="button" class="daily-nav" id="dailyPrev" title="Vorheriger Tag mit Fahrten">‹</button>
     <label class="ctl">Datum <input type="date" id="dailyDate"></label>
-    <button type="button" class="daily-nav" id="dailyNext" title="Nächster Tag mit Erstvorkommen">›</button>
+    <button type="button" class="daily-nav" id="dailyNext" title="Nächster Tag mit Fahrten">›</button>
     <span class="muted" id="dailySummary"></span>
   </div>
   <div id="dailyBody"></div>
@@ -1772,6 +1998,22 @@ function fmtDuration(min){ const h=Math.floor(min/60), m=min%60;
   return h? h+" h "+m+" min" : m+" min"; }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,c=>(
   {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+
+function isoToday(){
+  const d=new Date();
+  const m=String(d.getMonth()+1).padStart(2,"0");
+  const day=String(d.getDate()).padStart(2,"0");
+  return d.getFullYear()+"-"+m+"-"+day;
+}
+function datePickerMax(last){
+  const t=isoToday();
+  return (last && last>t)?last:t;
+}
+function bindDateInput(el, first, last){
+  if(!el) return;
+  if(first) el.min=first;
+  el.max=datePickerMax(last);
+}
 
 // Interner Linien-Schlüssel = Name + \\x1f + Operator; Anzeige nur der Name.
 const LINE_SEP="\x1f";
@@ -2436,11 +2678,12 @@ let map=null, mapBounds=[], mapFitted=false;
   // bei "Alle" nicht doppelt zählen.
   const ST=DATA.stations||{};        // "id" -> [lat, lon, name]
   const VAR=DATA.variants||[];       // [lineKey, locClass, category, operator, date]
+  const FAM=DATA.locClassFamilies||{}; // Familie -> [locClass, ...]
   const VEH=DATA.mapVehicles||[];    // [locClass, number]
   const rawEdges=DATA.edges||[];     // [a_id, b_id, variantIdx, count]
-  const rawNodes=DATA.nodes||[];     // [sid, variantIdx, count]
+  const rawNodes=DATA.nodes||[];     // [sid, variantIdx, count, usedCount]
   const rawVehEdges=DATA.vehEdges||[]; // [a_id, b_id, variantIdx, vehIdx, count]
-  const rawVehNodes=DATA.vehNodes||[]; // [sid, variantIdx, vehIdx, count]
+  const rawVehNodes=DATA.vehNodes||[]; // [sid, variantIdx, vehIdx, count, usedCount]
   if(!rawEdges.length){ return; }
   const lineEl=document.getElementById("mapLine");
   const locEl=document.getElementById("mapLoc");
@@ -2451,8 +2694,7 @@ let map=null, mapBounds=[], mapFitted=false;
   const dateEl=document.getElementById("mapDate");
   const countEl=document.getElementById("mapCount");
   const kpis=DATA.kpis||{};
-  if(kpis.first) dateEl.min=kpis.first;
-  if(kpis.last) dateEl.max=kpis.last;
+  bindDateInput(dateEl, kpis.first, kpis.last);
 
   // Farbskala nach Häufigkeit, Turbo-Spektrum Blau -> Rot.
   function color(t){ // t in [0,1]
@@ -2491,8 +2733,29 @@ let map=null, mapBounds=[], mapFitted=false;
       + tagged.map(x=>`<option value="${x.i}">${esc(vehLabel(x.v))}</option>`).join("")
       + (hasEmpty?'<option value="__none__">(ohne Fahrzeug)</option>':'');
   }
+  function fillLocSelect(){
+    const set=new Set(VAR.map(v=>v[1]));
+    const hasEmpty=set.has("");
+    const classes=[...set].filter(v=>v!=="")
+      .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+    const families=Object.keys(FAM)
+      .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+    let html='<option value="__all__">Alle</option>';
+    if(families.length){
+      html+='<optgroup label="Familien">'+
+        families.map(f=>`<option value="__fam__${esc(f)}">${esc(f)}</option>`).join("")+
+        '</optgroup>';
+    }
+    if(classes.length){
+      html+='<optgroup label="Baureihen">'+
+        classes.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join("")+
+        '</optgroup>';
+    }
+    if(hasEmpty) html+='<option value="__none__">(ohne Baureihe)</option>';
+    locEl.innerHTML=html;
+  }
   fillSelect(lineEl, VAR.map(v=>v[0]), "(ohne Linie)", lineName);
-  fillSelect(locEl, VAR.map(v=>v[1]), "(ohne Baureihe)");
+  fillLocSelect();
   fillVehicleSelect();
   fillSelect(catEl, VAR.map(v=>v[2]), "(ohne Kategorie)", catLabel);
   fillSelect(opEl, VAR.map(v=>v[3]), "(ohne Operator)");
@@ -2502,6 +2765,16 @@ let map=null, mapBounds=[], mapFitted=false;
   function sel(val, actual){
     if(val==="__all__") return true;
     if(val==="__none__") return actual==="";
+    return actual===val;
+  }
+  // Baureihen-Filter: exakter Tag, oder alle Mitglieder einer Familie (__fam__).
+  function selLoc(val, actual){
+    if(val==="__all__") return true;
+    if(val==="__none__") return actual==="";
+    if(val.startsWith("__fam__")){
+      const members=FAM[val.slice(7)]||[];
+      return members.indexOf(actual)>=0;
+    }
     return actual===val;
   }
   // Aktuelle Filter-Auswahl auf eine Variante (Attribut-Kombi) anwenden.
@@ -2515,7 +2788,7 @@ let map=null, mapBounds=[], mapFitted=false;
       ? true
       : sel(yearEl.value, date.slice(0,4));
     const dateOk=!dateWant || date===dateWant;
-    return sel(lineEl.value, v[0]) && sel(locEl.value, v[1])
+    return sel(lineEl.value, v[0]) && selLoc(locEl.value, v[1])
         && sel(catEl.value, v[2]) && sel(opEl.value, v[3]) && yearOk && dateOk;
   }
   function matchesVeh(vehIdx){
@@ -2530,7 +2803,8 @@ let map=null, mapBounds=[], mapFitted=false;
   // Ansicht neu aus den sichtbaren Zählwerten (min..max) bestimmen.
   let vEdges=[], vNodes=[], vMin=1, vMax=1;
   function scale(c){ if(vMax===vMin) return 0.5;
-    return (Math.log(c)-Math.log(vMin))/(Math.log(vMax)-Math.log(vMin)); }
+    const t=(Math.log(Math.max(c,1))-Math.log(vMin))/(Math.log(vMax)-Math.log(vMin));
+    return Math.max(0, Math.min(1, t)); }
   function computeVisible(){
     const useVeh=vehEl.value!=="__all__";
     const em=new Map();
@@ -2559,29 +2833,31 @@ let map=null, mapBounds=[], mapFitted=false;
     const nm=new Map();
     if(useVeh){
       rawVehNodes.forEach(row=>{
-        const sid=row[0], vi=row[1], vhi=row[2], cnt=row[3];
+        const sid=row[0], vi=row[1], vhi=row[2], cnt=row[3], used=row[4]||0;
         if(!matchesVar(vi) || !matchesVeh(vhi)) return;
         const s=ST[sid]; if(!s) return;
         const cur=nm.get(sid);
-        if(cur) cur.count+=cnt;
-        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt});
+        if(cur){ cur.count+=cnt; cur.usedCount+=used; }
+        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt,usedCount:used});
       });
     } else {
       rawNodes.forEach(row=>{
         const sid=row[0];
         if(!matchesVar(row[1])) return;
         const s=ST[sid]; if(!s) return;
+        const cnt=row[2], used=row[3]||0;
         const cur=nm.get(sid);
-        if(cur) cur.count+=row[2];
-        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:row[2]});
+        if(cur){ cur.count+=cnt; cur.usedCount+=used; }
+        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt,usedCount:used});
       });
     }
     vNodes=[...nm.values()];
     const cs=vEdges.map(e=>e.count);
     vMax=cs.length?Math.max(...cs):1;
     vMin=cs.length?Math.min(...cs):1;
-    // Dünne Kanten zuerst, damit dicke/häufige oben liegen.
+    // Dünne/seltene zuerst, damit dicke/häufige oben liegen.
     vEdges.sort((p,q)=>p.count-q.count);
+    vNodes.sort((p,q)=>p.count-q.count || ((p.usedCount||0)-(q.usedCount||0)));
   }
   // Gerichtete Kanten "im Rechtsverkehr": jede Richtung entlang der (nach rechts
   // zeigenden) Segment-Normalen versetzt, plus Richtungspfeil in der Mitte. In
@@ -2626,9 +2902,13 @@ let map=null, mapBounds=[], mapFitted=false;
     });
     // Knoten ZULETZT -> liegen optisch oben, fangen Klicks aber nur punktgenau ab.
     vNodes.forEach(n=>{
-      L.circleMarker([n.lat,n.lon],{radius:3,color:"#33475b",weight:1,
-        fillColor:"#5b6b7d",fillOpacity:.8})
-        .bindPopup(`<b>${esc(n.name)}</b><br>${n.count}× befahren`).addTo(overlay);
+      const used=(n.usedCount||0)>0;
+      const col=used?color(scale(n.usedCount)):"#5b6b7d";
+      L.circleMarker([n.lat,n.lon],{
+        radius:used?5:3, color:used?"#1e293b":"#33475b", weight:used?2:1,
+        fillColor:col, fillOpacity:used?.95:.8})
+        .bindPopup(`<b>${esc(n.name)}</b><br>${n.count}× befahren<br>`+
+          (used?`${n.usedCount}× Ein-/Ausstieg`:"nur Durchfahrt")).addTo(overlay);
     });
   }
 
@@ -2639,7 +2919,7 @@ let map=null, mapBounds=[], mapFitted=false;
       <i style="background:${color(0)}"></i> selten (${vMin}×)<br>
       <i style="background:${color(.5)}"></i> mittel<br>
       <i style="background:${color(1)}"></i> häufig (${vMax}×)<br>
-      <span class="muted">Pfeil = Fahrtrichtung</span>`;
+      <span class="muted">Pfeil = Fahrtrichtung<br>großer Punkt = Ein-/Ausstieg</span>`;
   }
   const lg=L.control({position:"bottomright"});
   lg.onAdd=function(){ legendDiv=L.DomUtil.create("div","legend"); updateLegend(); return legendDiv; };
@@ -2667,52 +2947,275 @@ let map=null, mapBounds=[], mapFitted=false;
 // ---------- Trips table ----------
 (function(){
   const tbody=document.querySelector("#tripsTable tbody");
+  const table=document.getElementById("tripsTable");
   const filterEl=document.getElementById("filter");
+  const dateFromEl=document.getElementById("tripDateFrom");
+  const dateToEl=document.getElementById("tripDateTo");
+  const copyBtn=document.getElementById("tripsCopy");
+  const delayEl=document.getElementById("tripShowDelay");
+  const routeEl=document.getElementById("tripShowRoute");
+  const timeEl=document.getElementById("tripTimeMode");
   let rows=DATA.trips.map((t,i)=>({...t,_i:i}));
+  const kpis=DATA.kpis||{};
+  bindDateInput(dateFromEl, kpis.first, kpis.last);
+  bindDateInput(dateToEl, kpis.first, kpis.last);
   let sortKey="date", sortAsc=false;
+  let visible=[];
+  let routeCacheKey="";
+  let routeByI=new Map();
+  const TSV_BASE=["Datum","Linie","Operator","Baureihe","Wagen","Von","Nach",
+    "Ab","An","Zwischenhalte","km","Min"];
 
+  function prefGet(k, d){ try{ const v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }
+  function prefSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+  delayEl.checked = prefGet("trwl-trips-delay","0")==="1";
+  routeEl.checked = false;
+  timeEl.value = prefGet("trwl-trips-times","planned")==="real" ? "real" : "planned";
+
+  function showDelay(){ return delayEl.checked; }
+  function showRoute(){ return routeEl.checked; }
+  function timeMode(){ return timeEl.value==="real" ? "real" : "planned"; }
+  function pickTime(planned, real){
+    return timeMode()==="planned" ? (planned||real) : (real||planned);
+  }
+  function tripDep(t){ return pickTime(t.depPlanned, t.depReal); }
+  function tripArr(t){ return pickTime(t.arrPlanned, t.arrReal); }
+  function colCount(){ return 12 + (showRoute()?1:0) + (showDelay()?1:0); }
+
+  function dash(v){ return v?esc(v):'<span class="muted">—</span>'; }
   function delayCell(d){ if(d==null) return '<span class="muted">—</span>';
     if(d>0) return `<span class="pos">+${d}</span>`;
     if(d<0) return `<span class="neg">${d}</span>`; return "0"; }
+  function delayText(d){ if(d==null) return ""; if(d>0) return "+"+d; return String(d); }
+  function timeText(iso){ if(!iso) return ""; const s=fmtTime(iso); return s==="—"?"":s; }
+
+  function stopKey(s){
+    if(s && s.id!=null && s.id!=="") return String(s.id);
+    return "n:"+((s && s.name)||"");
+  }
+  function tripPath(t){
+    const stops=t.stopovers||[];
+    const out=[];
+    const n=stops.length;
+    if(!n){
+      if(t.from) out.push({key:"n:"+t.from, name:t.from});
+      if(t.to && (!t.from || t.to!==t.from)) out.push({key:"n:"+t.to, name:t.to});
+      return out;
+    }
+    stops.forEach((s,i)=>{
+      if(i!==0 && i!==n-1 && s.cancelled) return;
+      const key=stopKey(s);
+      if(out.length && out[out.length-1].key===key) return;
+      out.push({key, name:s.name||""});
+    });
+    return out;
+  }
+  function firstAB(path, aKey, bKey){
+    let iA=-1;
+    for(let i=0;i<path.length;i++){
+      if(iA<0 && path[i].key===aKey) iA=i;
+      else if(iA>=0 && path[i].key===bKey) return [iA, i];
+    }
+    return null;
+  }
+  function computeRoutes(list){
+    const paths=list.map(tripPath);
+    const nbr=new Map(), od=new Set();
+    function addUndirected(a,b){
+      if(a===b) return;
+      if(!nbr.has(a)) nbr.set(a,new Set());
+      if(!nbr.has(b)) nbr.set(b,new Set());
+      nbr.get(a).add(b);
+      nbr.get(b).add(a);
+    }
+    paths.forEach(p=>{
+      if(!p.length) return;
+      od.add(p[0].key);
+      od.add(p[p.length-1].key);
+      for(let i=0;i<p.length-1;i++) addUndirected(p[i].key, p[i+1].key);
+    });
+    const anchors=new Set(od);
+    paths.forEach(p=>p.forEach(s=>{
+      if((nbr.get(s.key)||new Set()).size>2) anchors.add(s.key);
+    }));
+    function setsBetween(aKey, bKey){
+      const sets=[];
+      paths.forEach(p=>{
+        const pair=firstAB(p, aKey, bKey);
+        if(!pair) return;
+        const mid=new Set();
+        for(let i=pair[0]+1;i<pair[1];i++) mid.add(p[i].key);
+        sets.push(mid);
+      });
+      return sets;
+    }
+    const out=new Map();
+    list.forEach((t,idx)=>{
+      const p=paths[idx];
+      if(p.length<=1){
+        out.set(t._i, p.map(s=>s.name).filter(Boolean).join(" → "));
+        return;
+      }
+      const forced=[];
+      p.forEach((s,i)=>{
+        if(i===0 || i===p.length-1 || anchors.has(s.key)) forced.push(i);
+      });
+      const keep=new Set(forced);
+      for(let f=0;f<forced.length-1;f++){
+        const iA=forced[f], iB=forced[f+1];
+        if(iB<=iA+1) continue;
+        const sets=setsBetween(p[iA].key, p[iB].key);
+        if(sets.length<2) continue;
+        const sigs=new Set(sets.map(s=>[...s].sort().join("\0")));
+        if(sigs.size<2) continue;
+        let inter=null;
+        sets.forEach(s=>{
+          if(inter==null){ inter=new Set(s); return; }
+          [...inter].forEach(k=>{ if(!s.has(k)) inter.delete(k); });
+        });
+        const uniqueIdx=[];
+        for(let i=iA+1;i<iB;i++){
+          if(!inter.has(p[i].key)) uniqueIdx.push(i);
+        }
+        if(!uniqueIdx.length) continue;
+        keep.add(uniqueIdx[Math.floor((uniqueIdx.length-1)/2)]);
+      }
+      const parts=[];
+      let lastKey=null;
+      p.forEach((s,i)=>{
+        if(!keep.has(i) || s.key===lastKey) return;
+        lastKey=s.key;
+        if(s.name) parts.push(s.name);
+      });
+      out.set(t._i, parts.join(" → "));
+    });
+    return out;
+  }
+  function ensureRoutes(list){
+    if(!showRoute()) return;
+    const key=list.map(t=>t._i).slice().sort((a,b)=>a-b).join(",");
+    if(key===routeCacheKey) return;
+    routeCacheKey=key;
+    routeByI=computeRoutes(list);
+  }
+  function routeOf(t){ return routeByI.get(t._i)||""; }
 
   function detailHtml(t){
     const head=`<div class="stops"><div class="h">Halt</div><div class="h">An</div>
       <div class="h">Ab</div><div class="h">Gleis</div>`;
     const body=t.stopovers.map(s=>{
-      const an = s.arrivalReal||s.arrivalPlanned;
-      const ab = s.departureReal||s.departurePlanned;
+      const an = pickTime(s.arrivalPlanned, s.arrivalReal);
+      const ab = pickTime(s.departurePlanned, s.departureReal);
       const cancel = s.cancelled? ' style="text-decoration:line-through;color:#d1242f"':'';
       return `<div${cancel}>${esc(s.name)}</div><div>${fmtTime(an)}</div>
         <div>${fmtTime(ab)}</div><div>${esc(s.platform||"—")}</div>`;
     }).join("");
     const note = t.body? `<div class="muted" style="margin-top:8px">„${esc(t.body)}"</div>`:"";
-    return `<td colspan="10">${head}${body}</div>${note}</td>`;
+    return `<td colspan="${colCount()}">${head}${body}</div>${note}</td>`;
   }
 
-  function render(){
+  function filteredSorted(){
     const q=filterEl.value.toLowerCase().trim();
+    const fromVal=dateFromEl.value;
+    const toVal=dateToEl.value;
     // Immer Kopie: sonst sortiert list===rows die Quelle in-place und
     // rows[data-i] trifft nach dem Sort die falsche Fahrt.
-    let list=q
-      ? rows.filter(t=>(t.date+" "+lineName(t.line)+" "+t.locClass+" "+t.vehicles+" "+
-          t.category+" "+t.from+" "+t.to).toLowerCase().includes(q))
-      : rows.slice();
+    let list=rows.filter(t=>{
+      if(q){
+        const hay=(t.date+" "+lineName(t.line)+" "+(t.operator||"")+" "+
+          t.locClass+" "+t.vehicles+" "+t.category+" "+t.from+" "+t.to)
+          .toLowerCase();
+        if(!hay.includes(q)) return false;
+      }
+      const day=(t.date||"").slice(0,10);
+      if(fromVal && day<fromVal) return false;
+      if(toVal && day>toVal) return false;
+      return true;
+    });
+    if(showRoute() && sortKey==="route") ensureRoutes(list);
     list.sort((a,b)=>{
       let x=a[sortKey], y=b[sortKey];
       if(sortKey==="line"){ x=lineName(x); y=lineName(y); }
+      if(sortKey==="depTime"){ x=tripDep(a); y=tripDep(b); }
+      if(sortKey==="arrTime"){ x=tripArr(a); y=tripArr(b); }
+      if(sortKey==="route"){ x=routeOf(a); y=routeOf(b); }
       if(x==null)x=-Infinity; if(y==null)y=-Infinity;
       if(typeof x==="string"){ const r=x.localeCompare(y); return sortAsc?r:-r; }
       return sortAsc? x-y : y-x;
     });
-    document.getElementById("tripcount").textContent=list.length+" Fahrten";
-    tbody.innerHTML=list.map(t=>
+    return list;
+  }
+
+  function applyExtraCols(){
+    table.classList.toggle("no-delay", !showDelay());
+    table.classList.toggle("no-route", !showRoute());
+    const hidden=(sortKey==="delay" && !showDelay()) || (sortKey==="route" && !showRoute());
+    if(hidden){
+      sortKey="date"; sortAsc=false;
+      document.querySelectorAll("#tripsTable th").forEach(x=>x.classList.remove("sorted","asc"));
+      const th=table.querySelector('th[data-k="date"]');
+      if(th) th.classList.add("sorted");
+    }
+  }
+
+  function render(){
+    applyExtraCols();
+    visible=filteredSorted();
+    if(showRoute()) ensureRoutes(visible);
+    else { routeCacheKey=""; routeByI=new Map(); }
+    document.getElementById("tripcount").textContent=visible.length+" Fahrten";
+    tbody.innerHTML=visible.map(t=>
       `<tr class="trip" data-i="${t._i}">
         <td>${fmtDate(t.date)}</td><td>${esc(lineName(t.line))}</td>
-        <td>${esc(t.locClass)||'<span class="muted">—</span>'}</td>
-        <td>${esc(t.vehicles)||'<span class="muted">—</span>'}</td>
+        <td>${dash(t.operator)}</td>
+        <td>${dash(t.locClass)}</td>
+        <td>${dash(t.vehicles)}</td>
         <td>${esc(t.from)}</td><td>${esc(t.to)}</td>
+        <td>${fmtTime(tripDep(t))}</td><td>${fmtTime(tripArr(t))}</td>
+        <td>${t.viaStops}</td>
+        <td class="route">${esc(routeOf(t))}</td>
         <td>${t.distanceKm}</td><td>${t.durationMin}</td>
-        <td>${delayCell(t.delay)}</td><td>${t.points}</td></tr>`).join("");
+        <td class="delay">${delayCell(t.delay)}</td></tr>`).join("");
+  }
+
+  function tsvCell(s){ return String(s??"").replace(/[\t\n\r]+/g," ").trim(); }
+  function copyFallback(text){
+    const ta=document.createElement("textarea");
+    ta.value=text; ta.setAttribute("readonly","");
+    ta.style.cssText="position:fixed;left:-9999px";
+    document.body.appendChild(ta); ta.select();
+    let ok=false;
+    try{ ok=document.execCommand("copy"); }catch(e){}
+    document.body.removeChild(ta);
+    return ok;
+  }
+  function copyFeedback(ok){
+    const old=copyBtn.textContent;
+    copyBtn.textContent=ok?"Kopiert":"Kopieren fehlgeschlagen";
+    setTimeout(()=>{ copyBtn.textContent=old; }, ok?1500:2000);
+  }
+  function copyTsv(){
+    const headers=TSV_BASE.slice();
+    const routeOn=showRoute(), delayOn=showDelay();
+    if(routeOn) headers.splice(10, 0, "Laufweg");
+    if(delayOn) headers.push("Versp.");
+    const lines=[headers.join("\t")];
+    visible.forEach(t=>{
+      const row=[fmtDate(t.date), lineName(t.line), t.operator||"", t.locClass||"",
+        t.vehicles||"", t.from||"", t.to||"", timeText(tripDep(t)), timeText(tripArr(t)),
+        t.viaStops];
+      if(routeOn) row.push(routeOf(t));
+      row.push(t.distanceKm, t.durationMin);
+      if(delayOn) row.push(delayText(t.delay));
+      lines.push(row.map(tsvCell).join("\t"));
+    });
+    const text=lines.join("\n");
+    if(navigator.clipboard && window.isSecureContext){
+      navigator.clipboard.writeText(text).then(()=>copyFeedback(true))
+        .catch(()=>copyFeedback(copyFallback(text)));
+      return;
+    }
+    copyFeedback(copyFallback(text));
   }
 
   tbody.addEventListener("click",e=>{
@@ -2727,12 +3230,21 @@ let map=null, mapBounds=[], mapFitted=false;
 
   document.querySelectorAll("#tripsTable th").forEach(th=>th.onclick=()=>{
     const k=th.dataset.k;
+    if((k==="delay" && !showDelay()) || (k==="route" && !showRoute())) return;
     if(sortKey===k) sortAsc=!sortAsc; else { sortKey=k; sortAsc=true; }
     document.querySelectorAll("#tripsTable th").forEach(x=>x.classList.remove("sorted","asc"));
     th.classList.add("sorted"); if(sortAsc) th.classList.add("asc");
     render();
   });
+  delayEl.onchange=()=>{ prefSet("trwl-trips-delay", showDelay()?"1":"0"); render(); };
+  routeEl.onchange=render;
+  timeEl.onchange=()=>{ prefSet("trwl-trips-times", timeMode()); render(); };
+  copyBtn.onclick=copyTsv;
   filterEl.oninput=render;
+  [dateFromEl,dateToEl].forEach(el=>{
+    el.onchange=render;
+    el.oninput=render;
+  });
   render();
 })();
 
@@ -2978,7 +3490,8 @@ let map=null, mapBounds=[], mapFitted=false;
 // ---------- Tagesziele ----------
 (function(){
   const DF=DATA.dailyFirsts||{};
-  const dates=Object.keys(DF).sort();
+  const DR=DATA.dailyRepeats||{};
+  const dates=[...new Set(Object.keys(DF).concat(Object.keys(DR)))].sort();
   const dateEl=document.getElementById("dailyDate");
   const prevBtn=document.getElementById("dailyPrev");
   const nextBtn=document.getElementById("dailyNext");
@@ -3005,11 +3518,17 @@ let map=null, mapBounds=[], mapFitted=false;
       {k:"key", label:"Wagen", lbl:true},
       {k:"locClass", label:"Baureihe", lbl:true},
     ]},
+    {key:"topVehicleInClass", title:"Top-Wagen der Baureihe", cols:[
+      {k:"vehicle", label:"Wagen", lbl:true},
+      {k:"locClass", label:"Baureihe", lbl:true},
+      {k:"prevVehicle", label:"zuvor", lbl:true},
+    ]},
     {key:"edges", title:"Kanten", cols:[
       {k:"from", label:"Von", lbl:true},
       {k:"to", label:"Nach", lbl:true},
     ]},
-    {key:"stations", title:"Stationen", cols:[{k:"key", label:"Station", lbl:true}]},
+    {key:"stationsUsed", title:"Benutzte Stationen", cols:[{k:"key", label:"Station", lbl:true}]},
+    {key:"stationsThrough", title:"Durchfahrene Stationen", cols:[{k:"key", label:"Station", lbl:true}]},
   ];
   const combos=[
     {key:"lineVehicle", title:"Fahrzeug × Linie", cols:[
@@ -3053,8 +3572,7 @@ let map=null, mapBounds=[], mapFitted=false;
     ]},
   ];
 
-  if(DATA.kpis&&DATA.kpis.first) dateEl.min=DATA.kpis.first;
-  if(DATA.kpis&&DATA.kpis.last) dateEl.max=DATA.kpis.last;
+  bindDateInput(dateEl, DATA.kpis&&DATA.kpis.first, DATA.kpis&&DATA.kpis.last);
   dateEl.value=dates.length?dates[dates.length-1]:(DATA.kpis&&DATA.kpis.last)||"";
 
   function idxOf(d){ return dates.indexOf(d); }
@@ -3072,7 +3590,8 @@ let map=null, mapBounds=[], mapFitted=false;
       lines: keysOf(buckets.lines, r=>r.key),
       locs: keysOf(buckets.locClasses, r=>r.key),
       vehs: keysOf(buckets.vehicles, r=>r.key),
-      stations: keysOf(buckets.stations, r=>r.key),
+      stationsUsed: keysOf(buckets.stationsUsed, r=>r.key),
+      stationsThrough: keysOf(buckets.stationsThrough, r=>r.key),
       edges: keysOf(buckets.edges, edgeKey),
       vehLine: keysOf(buckets.lineVehicle, r=>r.vehicle+"\0"+r.line),
       locLine: keysOf(buckets.lineLocClass, r=>r.locClass+"\0"+r.line),
@@ -3089,7 +3608,7 @@ let map=null, mapBounds=[], mapFitted=false;
     if(specKey==="vehEdge") return S.vehs.has(row.vehicle)||S.edges.has(ek);
     if(specKey==="lineEdge") return S.lines.has(row.line)||S.edges.has(ek);
     if(specKey==="locEdge") return S.locs.has(row.locClass)||S.edges.has(ek);
-    if(specKey==="stationLine") return S.stations.has(row.station)||S.lines.has(row.line);
+    if(specKey==="stationLine") return S.stationsUsed.has(row.station)||S.stationsThrough.has(row.station)||S.lines.has(row.line);
     if(specKey==="vehEdgeLine") return S.vehs.has(row.vehicle)||S.edges.has(ek)||S.lines.has(row.line)
       ||S.vehLine.has(row.vehicle+"\0"+row.line)
       ||S.vehEdge.has(row.vehicle+"\0"+row.from+"\0"+row.to)
@@ -3106,7 +3625,7 @@ let map=null, mapBounds=[], mapFitted=false;
     return tagged;
   }
 
-  function renderTable(spec, rows, sets){
+  function renderTable(spec, rows, sets, impliedTitle){
     if(!rows||!rows.length) return "";
     const tagged=prepareRows(spec, rows, sets);
     const impliedN=tagged.reduce((n,x)=>n+(x.implied?1:0), 0);
@@ -3114,12 +3633,13 @@ let map=null, mapBounds=[], mapFitted=false;
     wrap.className="panel stats-scroll";
     wrap.style.marginBottom="16px";
     let showAll=tagged.length<=INITIAL;
+    const hint=impliedTitle||"folgt aus anderem Erstvorkommen";
     function paint(){
       const data=showAll?tagged:tagged.slice(0, INITIAL);
       const remaining=tagged.length-data.length;
       const head=spec.cols.map(c=>`<th class="${c.lbl||c.line?"lbl":""}">${esc(c.label)}</th>`).join("");
       const body=data.map(({r, implied})=>{
-        const cls=implied?' class="daily-implied" title="folgt aus anderem Erstvorkommen"':"";
+        const cls=implied?' class="daily-implied" title="'+esc(hint)+'"':"";
         return "<tr"+cls+">"+spec.cols.map(c=>{
           const v=r[c.k];
           if(c.line) return `<td class="lbl">${badge(v)}</td>`;
@@ -3144,7 +3664,9 @@ let map=null, mapBounds=[], mapFitted=false;
   function render(){
     const d=dateEl.value;
     const buckets=DF[d]||{};
+    const repeatBuckets=DR[d]||{};
     const sets=cascadeSets(buckets);
+    const repeatSets=cascadeSets(repeatBuckets);
     prevBtn.disabled=!dates.some(x=>x<d);
     nextBtn.disabled=!dates.some(x=>x>d);
 
@@ -3153,9 +3675,10 @@ let map=null, mapBounds=[], mapFitted=false;
       const n=(buckets[s.key]||[]).length;
       if(n) chips.push(`<span>${esc(s.title)}: ${fmtN(n)}</span>`);
     });
+    const hasRepeats=singles.concat(combos).some(s=>(repeatBuckets[s.key]||[]).length);
     summaryEl.textContent=dates.length
-      ? (chips.length?"":`Keine Erstvorkommen am ${d||"—"}`)
-      : "Keine Erstvorkommen in den Daten";
+      ? (chips.length||hasRepeats?"":`Keine Fahrten am ${d||"—"}`)
+      : "Keine Fahrten in den Daten";
 
     bodyEl.innerHTML="";
     if(chips.length){
@@ -3165,12 +3688,12 @@ let map=null, mapBounds=[], mapFitted=false;
       bodyEl.appendChild(chipRow);
     }
 
-    function appendGroup(title, specs){
+    function appendGroup(title, specs, srcBuckets, srcSets, impliedTitle){
       const parts=[];
       specs.forEach(s=>{
-        const rows=buckets[s.key]||[];
+        const rows=srcBuckets[s.key]||[];
         if(!rows.length) return;
-        parts.push(renderTable(s, rows, sets));
+        parts.push(renderTable(s, rows, srcSets, impliedTitle));
       });
       if(!parts.length) return;
       const g=document.createElement("div");
@@ -3179,8 +3702,12 @@ let map=null, mapBounds=[], mapFitted=false;
       parts.forEach(p=>g.appendChild(p));
       bodyEl.appendChild(g);
     }
-    appendGroup("Neu", singles);
-    appendGroup("Erste Kombis", combos);
+    appendGroup("Neu", singles, buckets, sets);
+    appendGroup("Erste Kombis", combos, buckets, sets);
+    appendGroup("Wiederholungen", singles.filter(s=>s.key!=="topVehicleInClass"),
+      repeatBuckets, repeatSets, "folgt aus anderer Wiederholung");
+    appendGroup("Wiederholte Kombis", combos, repeatBuckets, repeatSets,
+      "folgt aus anderer Wiederholung");
   }
 
   function step(dir){
@@ -3226,6 +3753,12 @@ def main(argv=None):
         "--ignore-plus", action="store_true",
         help="Wagennummern-Tags nicht am '+' trennen (Doppeltraktion bleibt ein Fahrzeug).",
     )
+    parser.add_argument(
+        "--loc-class-families", default="loc_class_families.txt",
+        help="Baureihe→Familie für den Kartenfilter "
+             "(Default: loc_class_families.txt; JSON-Objekt, "
+             "gleiche Baureihe darf mehrfach vorkommen).",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -3253,7 +3786,24 @@ def main(argv=None):
         log(f"Warnung: {args.stations} nicht lesbar ({e}) – Karte bleibt leer.")
         stations = {}
 
-    data = build_data(statuses, stations, ignore_plus=args.ignore_plus)
+    try:
+        loc_class_families = load_loc_class_families(args.loc_class_families)
+    except ValueError as e:
+        log(f"Fehler: {e}")
+        return 2
+    if loc_class_families:
+        n = sum(len(v) if isinstance(v, list) else 1
+                for v in loc_class_families.values())
+        log(f"Baureihenfamilien: {n} Zuordnungen "
+            f"aus {args.loc_class_families}.")
+    elif os.path.isfile(args.loc_class_families):
+        log(f"Baureihenfamilien: {args.loc_class_families} enthält keine Regeln.")
+
+    data = build_data(
+        statuses, stations,
+        ignore_plus=args.ignore_plus,
+        loc_class_families=loc_class_families,
+    )
     log(f"Ausgewertet: {data['kpis']['count']} Fahrten, {len(data['edges'])} Karten-Kanten, "
         f"{len(data['segments'])} Segmente.")
 

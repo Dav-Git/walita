@@ -42,6 +42,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── version.py             # Version + User-Agent
 ├── operator_replacements.json  # manuelle Operator-Namen-Ersetzungen
+├── loc_class_families.txt      # Baureihe → Familie (Kartenfilter)
 ├── examples/              # Demo-Dataset (eingecheckt, siehe Demo)
 │   ├── statuses.json
 │   └── stations.json
@@ -116,7 +117,7 @@ Refresh → interaktiver Login. Fehlen am Cache die benötigten Scopes
 | `--since YYYY-MM-DD` | Nur Statuses mit Abfahrt **strikt nach** diesem Tag |
 | `--skip-trips` | Keine Zwischenhalte nachladen (kein `/stopovers`) |
 | `--refresh-trips` | `trips.json`-Cache ignorieren, alle Trips neu von der API |
-| `--refresh-stations` | `stations.json`-Cache ignorieren, Koordinaten neu auflösen |
+| `--refresh-stations` | `stations.json`-Cache ignorieren, Koordinaten und Identifier neu auflösen |
 | `--no-stations` | Keine `stations.json` schreiben (Karte ohne Koordinaten) |
 | `--operator-replacements PFAD` | JSON mit Operator-Namen-Ersetzungen (Default `operator_replacements.json`) |
 
@@ -127,6 +128,7 @@ Refresh → interaktiver Login. Fehlen am Cache die benötigten Scopes
 | `--open` | Dashboard im Browser öffnen (**Default**) |
 | `--no-open` | Nicht im Browser öffnen |
 | `--ignore-plus` | Wagennummern-Tags nicht am `+` trennen (Doppeltraktion = ein Fahrzeug) |
+| `--loc-class-families PFAD` | Baureihe→Familie für den Kartenfilter (Default `loc_class_families.txt`; JSON-Objekt, gleiche Baureihe darf mehrfach vorkommen) |
 
 ### Modi
 
@@ -152,7 +154,7 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 | Datei | Inhalt |
 | --- | --- |
 | `statuses.json` | Alle (gefilterten) Statuses; bei erfolgreichem Trip-Nachladen inkl. `trip.stopovers` |
-| `stations.json` | `station_id → {name, lat, lon}` für die Karte |
+| `stations.json` | `station_id → {name, lat, lon, identifiers}` für die Karte; Identifier (IBNR, DHID/IFOPT, MOTIS, …) per `GET /station/{id}?withIdentifiers=true` |
 | `trips.json` | Persistenter Cache der Zwischenhalte, je Trip-ID |
 | `dashboard.html` | Selbstständiges Dashboard (von `walita` / `build_dashboard`) |
 | `oauth_token.json` | OAuth Access-/Refresh-Token (gitignored) |
@@ -160,23 +162,36 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 ### Ablauf (Stufe 1)
 
 1. `GET /auth/user` → Benutzername.
-2. `GET /user/{username}/statuses`, paginiert über `links.next`. Pro Status nur
-   Start- und Zielhalt.
-3. `GET /stopovers/{tripIds}` → Zwischenhalte, als Feld `trip.stopovers` am Status.
+2. `GET /user/{username}/statuses?withIdentifiers=true`, paginiert über `links.next`.
+   Pro Status nur Start- und Zielhalt (Identifier, falls die API sie an diesem
+   Endpoint mitgibt).
+3. `GET /stopovers/{tripIds}?withIdentifiers=true` → Zwischenhalte, als Feld
+   `trip.stopovers` am Status.
    Die Trip-ID steht schon als `checkin.trip` im Status, es sind also bis zu 50
    Fahrten pro Anfrage. Cache pro Trip-ID im Lauf und in `trips.json`; fehlende
    Einträge werden nachgeladen, Fehler (`trip: null`, `trip_error`) **nicht**
    persistiert und beim nächsten Lauf erneut versucht. `--refresh-trips` leert
    den Cache. Fehlt `trips.json`, werden die Stopovers aus vorhandener
    `statuses.json` übernommen.
-4. Stations-Koordinaten kommen aus dem `station`-Objekt jedes Stopovers; nur
-   Stationen ohne Stopover-Deckung werden per `GET /station/{id}` nachgeladen
-   → `stations.json`.
+4. Stations-Koordinaten kommen aus dem `station`-Objekt jedes Stopovers. Fehlen
+   Koordinaten oder Identifier, wird `GET /station/{id}?withIdentifiers=true`
+   nachgeladen → `stations.json`. Dieselben Identifier werden vor dem Schreiben
+   in `statuses.json` (Origin, Destination, Zwischenhalte) und `trips.json`
+   übernommen. Ein vorhandener Cache ohne Identifier wird einmalig nachgezogen;
+   `--refresh-stations` holt alles neu.
 5. Vor dem Schreiben von `statuses.json` werden Operator-Namen anhand von
    [`operator_replacements.json`](operator_replacements.json) vereinheitlicht
    (`checkin.operator.name`: Rohname → kanonischer Name). Die Datei ist manuell
    zu pflegen; Schlüssel mit führendem `_` (Kommentare) werden ignoriert.
    Fehlt die Datei, bleibt alles unverändert.
+
+Baureihenfamilien für den Kartenfilter stehen in
+[`loc_class_families.txt`](loc_class_families.txt) (JSON-Objekt
+Baureihe → Familie; dieselbe Baureihe darf mehrfach vorkommen und steht
+dann in mehreren Familien). Schlüssel mit führendem `_` werden ignoriert,
+fehlende Datei = keine Familien. Die Datei wird erst beim Dashboard-Bau
+gelesen, nicht beim Export. Die Endung `.txt` verhindert die
+Duplicate-Key-Warnung des Editors; der Loader liest alle Paare.
 
 ### OAuth-Login
 
@@ -211,6 +226,8 @@ Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
 
 - **Karte** – Heatmap gerichteter Kanten entlang der tatsächlich befahrenen
   Zwischenhalte; Filter nach Linie, Baureihe, Kategorie, Operator, Jahr.
+  Gemappte Baureihenfamilien erscheinen zusätzlich im Dropdown „Baureihe“
+  (Auswahl der Familie zeigt alle Mitglieds-Baureihen).
   Dicke und Farbe zeigen, wie oft ein Segment befahren wurde, der Pfeil die
   Richtung. Braucht Internet (Leaflet + Kacheln); der Rest läuft offline.
 
@@ -222,8 +239,9 @@ Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
 
   ![Statistiken](docs/screenshots/04-statistiken.png)
 
-- **Fahrten** – durchsuch-/sortierbare Tabelle; Klick zeigt Stopovers mit Zeiten,
-  Gleis und Verspätung.
+- **Fahrten** – durchsuch-/sortierbare Tabelle mit Datumsbereich (Von/Bis);
+  optionale Spalte „Laufweg“ (komprimierte Stationenkette der sichtbaren Fahrten);
+  Klick zeigt Stopovers mit Zeiten, Gleis und Verspätung.
 
   ![Fahrten](docs/screenshots/06-fahrten.png)
 
@@ -232,8 +250,9 @@ Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
 
   ![Fahrzeuge](docs/screenshots/05-fahrzeuge.png)
 
-- **Tagesziele** – Erstvorkommen an einem gewählten Tag (Linien, Fahrzeuge,
-  Kanten, Stationen und Kombis).
+- **Tagesziele** – Erstvorkommen und Wiederholungen an einem gewählten Tag
+  (Linien, Fahrzeuge, Top-Wagen der Baureihe, Kanten, benutzte vs. durchfahrene
+  Stationen und Kombis).
 
   ![Tagesziele](docs/screenshots/07-tagesziele.png)
 

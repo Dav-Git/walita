@@ -85,7 +85,7 @@ def main(argv=None):
     )
     export.add_argument(
         "--refresh-stations", action="store_true",
-        help="Stations-Cache ignorieren, Koordinaten neu auflösen.",
+        help="Stations-Cache ignorieren, Koordinaten und Identifier neu auflösen.",
     )
     export.add_argument(
         "--no-stations", action="store_true",
@@ -108,6 +108,12 @@ def main(argv=None):
     dash.add_argument(
         "--ignore-plus", action="store_true",
         help="Wagennummern-Tags nicht am '+' trennen.",
+    )
+    dash.add_argument(
+        "--loc-class-families", default="loc_class_families.txt",
+        help="Baureihe→Familie für den Kartenfilter "
+             "(Default: loc_class_families.txt; JSON-Objekt, "
+             "gleiche Baureihe darf mehrfach vorkommen).",
     )
 
     mode = parser.add_argument_group("Modus")
@@ -165,6 +171,7 @@ def main(argv=None):
             dash_argv.append("--open")
         if args.ignore_plus:
             dash_argv.append("--ignore-plus")
+        dash_argv.extend(["--loc-class-families", args.loc_class_families])
         return build_dashboard.main(dash_argv)
 
     if not args.dashboard_only:
@@ -203,6 +210,7 @@ def main(argv=None):
         dash_argv.append("--open")
     if args.ignore_plus:
         dash_argv.append("--ignore-plus")
+    dash_argv.extend(["--loc-class-families", args.loc_class_families])
     return build_dashboard.main(dash_argv)
 
 

@@ -12,6 +12,7 @@ Führt nacheinander `download_statuses` und `build_dashboard` aus (Defaults unte
     python3 walita.py --no-open       # ohne Browser
     python3 walita.py --demo          # Demo aus examples/ (kein Token nötig)
     python3 walita.py --dashboard-only  # nur Dashboard neu erzeugen aus vorhandener data/
+    python3 walita.py --edit          # Tag-Editor (live Tags + Status-Text)
 """
 
 import argparse
@@ -26,7 +27,8 @@ from version import __version__
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog="Details zu einzelnen Schritten: download_statuses.py / build_dashboard.py --help",
+        epilog="Details zu einzelnen Schritten: download_statuses.py / "
+               "build_dashboard.py / status_editor.py --help",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -42,7 +44,8 @@ def main(argv=None):
     )
     auth.add_argument(
         "--login", action="store_true",
-        help="OAuth-Login im Browser erzwingen (Scope read-statuses).",
+        help="OAuth-Login im Browser erzwingen (Export: read-statuses; "
+             "mit --edit zusätzlich write-statuses).",
     )
     auth.add_argument(
         "--logout", action="store_true",
@@ -127,6 +130,10 @@ def main(argv=None):
         "--dashboard-only", action="store_true",
         help="Export überspringen, Dashboard aus vorhandener data/ bauen.",
     )
+    mode_excl.add_argument(
+        "--edit", action="store_true",
+        help="Tag-Editor öffnen (Tags und Status-Text live auf Träwelling).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -160,6 +167,29 @@ def main(argv=None):
         return download_statuses.main(
             ["--logout", "--oauth-token-file", args.oauth_token_file]
         )
+
+    if args.edit:
+        import status_editor
+        edit_argv = []
+        if args.token:
+            edit_argv.extend(["--token", args.token])
+        if args.login:
+            edit_argv.append("--login")
+        if args.client_id:
+            edit_argv.extend(["--client-id", args.client_id])
+        if args.redirect_uri:
+            edit_argv.extend(["--redirect-uri", args.redirect_uri])
+        if args.manual:
+            edit_argv.append("--manual")
+        edit_argv.extend(["--oauth-token-file", args.oauth_token_file])
+        if args.limit is not None:
+            edit_argv.extend(["--limit", str(args.limit)])
+        if args.since:
+            edit_argv.extend(["--since", args.since])
+        if args.ignore_plus:
+            edit_argv.append("--ignore-plus")
+        edit_argv.extend(["--loc-class-families", args.loc_class_families])
+        return status_editor.main(edit_argv)
 
     if args.demo:
         dash_argv = [

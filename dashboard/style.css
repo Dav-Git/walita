@@ -231,6 +231,34 @@
   .daily-group > h3 { margin:0 0 12px; font-size:17px; }
   table.stats tr.daily-implied td { background:var(--panel2); color:var(--muted); }
 
+  /* ---- Linien-Katalog ---- */
+  .line-op { margin:0 0 28px; }
+  .line-op > h3 { margin:0 0 12px; font-size:17px; }
+  .line-op > h3 .muted { font-weight:500; font-size:13px; }
+  .line-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+        box-shadow:var(--shadow); margin:0 0 12px; }
+  .line-card > summary { list-style:none; cursor:pointer; padding:14px 16px;
+        display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .line-card > summary::-webkit-details-marker { display:none; }
+  .line-card > summary::before { content:"▸"; color:var(--muted); font-size:12px;
+        flex:0 0 auto; line-height:1; }
+  .line-card[open] > summary::before { content:"▾"; }
+  .line-card-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .line-card-meta { color:var(--muted); font-size:13px; }
+  .line-card-body { padding:0 16px 14px; }
+  .line-stack { display:flex; height:10px; border-radius:5px; overflow:hidden;
+        background:var(--panel2); margin:0 0 8px; }
+  .line-stack > i { display:block; height:100%; min-width:0; }
+  .line-stack-legend { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:12px; color:var(--muted); }
+  .line-stack-legend span { display:inline-flex; align-items:center; gap:6px; }
+  .line-stack-legend i { display:inline-block; width:8px; height:8px; border-radius:2px; flex:0 0 8px; }
+  table.line-edges { width:100%; margin-top:10px; }
+  table.line-edges th, table.line-edges td { padding:6px 8px; font-size:12px;
+        border-bottom:1px solid var(--border); }
+  table.line-edges th { color:var(--muted); cursor:default; font-weight:600; }
+  table.line-edges td.n { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  table.line-edges tr:last-child td { border-bottom:none; }
+
   /* ---- Mobile: Sidebar wird zur oberen Leiste ---- */
   .navtoggle { display:none; }
   @media (max-width:760px){

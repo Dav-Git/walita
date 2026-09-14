@@ -31,10 +31,184 @@ const lineName=k=>{
   const s=String(k), i=s.indexOf(LINE_SEP);
   return i<0 ? s : s.slice(0,i);
 };
+const lineOperator=k=>{
+  if(k==null||k==="") return "";
+  const s=String(k), i=s.indexOf(LINE_SEP);
+  return i<0 ? "" : s.slice(i+1);
+};
 
 // Produktkategorie -> Label (global, von Karte und Fahrzeugen genutzt).
 const CAT_LABEL={suburban:"S-Bahn",regional:"Regional",regionalExp:"Regional-Express",
   nationalExpress:"Fernverkehr",national:"Fernverkehr",tram:"Tram",subway:"U-Bahn",
   bus:"Bus",ferry:"Fähre"};
 const catLabel=c=>CAT_LABEL[c]||c||"Unbekannt";
+
+function tsvCell(s){ return String(s??"").replace(/[\t\n\r]+/g," ").trim(); }
+function copyFallback(text){
+  const ta=document.createElement("textarea");
+  ta.value=text; ta.setAttribute("readonly","");
+  ta.style.cssText="position:fixed;left:-9999px";
+  document.body.appendChild(ta); ta.select();
+  let ok=false;
+  try{ ok=document.execCommand("copy"); }catch(e){}
+  document.body.removeChild(ta);
+  return ok;
+}
+function copyText(text, btn){
+  function feedback(ok){
+    if(!btn) return;
+    const old=btn.textContent;
+    btn.textContent=ok?"Kopiert":"Kopieren fehlgeschlagen";
+    setTimeout(()=>{ btn.textContent=old; }, ok?1500:2000);
+  }
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(text).then(()=>feedback(true))
+      .catch(()=>feedback(copyFallback(text)));
+    return;
+  }
+  feedback(copyFallback(text));
+}
+
+const TRIP_TSV_BASE=["Datum","Linie","Operator","Baureihe","Wagen","Von","Nach",
+  "Ab","An","Zwischenhalte","km","Min"];
+
+function tripStopKey(s){
+  if(s && s.id!=null && s.id!=="") return String(s.id);
+  return "n:"+((s && s.name)||"");
+}
+function tripPath(t){
+  const stops=t.stopovers||[];
+  const out=[];
+  const n=stops.length;
+  if(!n){
+    if(t.from) out.push({key:"n:"+t.from, name:t.from});
+    if(t.to && (!t.from || t.to!==t.from)) out.push({key:"n:"+t.to, name:t.to});
+    return out;
+  }
+  stops.forEach((s,i)=>{
+    if(i!==0 && i!==n-1 && s.cancelled) return;
+    const key=tripStopKey(s);
+    if(out.length && out[out.length-1].key===key) return;
+    out.push({key, name:s.name||""});
+  });
+  return out;
+}
+function tripFirstAB(path, aKey, bKey){
+  let iA=-1;
+  for(let i=0;i<path.length;i++){
+    if(iA<0 && path[i].key===aKey) iA=i;
+    else if(iA>=0 && path[i].key===bKey) return [iA, i];
+  }
+  return null;
+}
+function computeTripRoutes(list){
+  const paths=list.map(tripPath);
+  const nbr=new Map(), od=new Set();
+  function addUndirected(a,b){
+    if(a===b) return;
+    if(!nbr.has(a)) nbr.set(a,new Set());
+    if(!nbr.has(b)) nbr.set(b,new Set());
+    nbr.get(a).add(b);
+    nbr.get(b).add(a);
+  }
+  paths.forEach(p=>{
+    if(!p.length) return;
+    od.add(p[0].key);
+    od.add(p[p.length-1].key);
+    for(let i=0;i<p.length-1;i++) addUndirected(p[i].key, p[i+1].key);
+  });
+  const anchors=new Set(od);
+  paths.forEach(p=>p.forEach(s=>{
+    if((nbr.get(s.key)||new Set()).size>2) anchors.add(s.key);
+  }));
+  function setsBetween(aKey, bKey){
+    const sets=[];
+    paths.forEach(p=>{
+      const pair=tripFirstAB(p, aKey, bKey);
+      if(!pair) return;
+      const mid=new Set();
+      for(let i=pair[0]+1;i<pair[1];i++) mid.add(p[i].key);
+      sets.push(mid);
+    });
+    return sets;
+  }
+  const out=new Map();
+  list.forEach((t,idx)=>{
+    const id=t._i!=null?t._i:idx;
+    const p=paths[idx];
+    if(p.length<=1){
+      out.set(id, p.map(s=>s.name).filter(Boolean).join(" → "));
+      return;
+    }
+    const forced=[];
+    p.forEach((s,i)=>{
+      if(i===0 || i===p.length-1 || anchors.has(s.key)) forced.push(i);
+    });
+    const keep=new Set(forced);
+    for(let f=0;f<forced.length-1;f++){
+      const iA=forced[f], iB=forced[f+1];
+      if(iB<=iA+1) continue;
+      const sets=setsBetween(p[iA].key, p[iB].key);
+      if(sets.length<2) continue;
+      const sigs=new Set(sets.map(s=>[...s].sort().join("\0")));
+      if(sigs.size<2) continue;
+      let inter=null;
+      sets.forEach(s=>{
+        if(inter==null){ inter=new Set(s); return; }
+        [...inter].forEach(k=>{ if(!s.has(k)) inter.delete(k); });
+      });
+      const uniqueIdx=[];
+      for(let i=iA+1;i<iB;i++){
+        if(!inter.has(p[i].key)) uniqueIdx.push(i);
+      }
+      if(!uniqueIdx.length) continue;
+      keep.add(uniqueIdx[Math.floor((uniqueIdx.length-1)/2)]);
+    }
+    const parts=[];
+    let lastKey=null;
+    p.forEach((s,i)=>{
+      if(!keep.has(i) || s.key===lastKey) return;
+      lastKey=s.key;
+      if(s.name) parts.push(s.name);
+    });
+    out.set(id, parts.join(" → "));
+  });
+  return out;
+}
+function tripTimeText(iso){
+  if(!iso) return "";
+  const s=fmtTime(iso);
+  return s==="—"?"":s;
+}
+function tripDelayText(d){
+  if(d==null) return "";
+  if(d>0) return "+"+d;
+  return String(d);
+}
+function tripsTsv(list, opts){
+  opts=opts||{};
+  const routeOn=!!opts.route;
+  const delayOn=!!opts.delay;
+  const mode=opts.timeMode==="real"?"real":"planned";
+  const headers=TRIP_TSV_BASE.slice();
+  if(routeOn) headers.splice(10, 0, "Laufweg");
+  if(delayOn) headers.push("Versp.");
+  const routes=routeOn?computeTripRoutes(list||[]):null;
+  const lines=[headers.join("\t")];
+  (list||[]).forEach((t,i)=>{
+    const dep=mode==="planned"?(t.depPlanned||t.depReal):(t.depReal||t.depPlanned);
+    const arr=mode==="planned"?(t.arrPlanned||t.arrReal):(t.arrReal||t.arrPlanned);
+    const row=[fmtDate(t.date), lineName(t.line), t.operator||"", t.locClass||"",
+      t.vehicles||"", t.from||"", t.to||"", tripTimeText(dep), tripTimeText(arr),
+      t.viaStops];
+    if(routeOn){
+      const id=t._i!=null?t._i:i;
+      row.push((routes&&routes.get(id))||"");
+    }
+    row.push(t.distanceKm, t.durationMin);
+    if(delayOn) row.push(tripDelayText(t.delay));
+    lines.push(row.map(tsvCell).join("\t"));
+  });
+  return lines.join("\n");
+}
 

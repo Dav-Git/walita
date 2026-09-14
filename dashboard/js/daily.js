@@ -8,6 +8,7 @@
   const nextBtn=document.getElementById("dailyNext");
   const summaryEl=document.getElementById("dailySummary");
   const bodyEl=document.getElementById("dailyBody");
+  const copyBtn=document.getElementById("dailyCopy");
   const LC=DATA.lineColors||{};
   const INITIAL=40;
 
@@ -31,8 +32,12 @@
     ]},
     {key:"topVehicleInClass", title:"Top-Wagen der Baureihe", cols:[
       {k:"vehicle", label:"Wagen", lbl:true},
+      {k:"km", label:"km", num:true},
+      {k:"count", label:"Fahrten", num:true},
       {k:"locClass", label:"Baureihe", lbl:true},
       {k:"prevVehicle", label:"zuvor", lbl:true},
+      {k:"prevKm", label:"km zuvor", num:true},
+      {k:"prevCount", label:"Fahrten zuvor", num:true},
     ]},
     {key:"edges", title:"Kanten", cols:[
       {k:"from", label:"Von", lbl:true},
@@ -154,6 +159,7 @@
         return "<tr"+cls+">"+spec.cols.map(c=>{
           const v=r[c.k];
           if(c.line) return `<td class="lbl">${badge(v)}</td>`;
+          if(c.num) return `<td>${esc(fmtN(v))}</td>`;
           return `<td class="lbl">${esc(v==null||v===""?"—":v)}</td>`;
         }).join("")+"</tr>";
       }).join("");
@@ -235,9 +241,55 @@
     if(ni>=0 && ni<dates.length){ dateEl.value=dates[ni]; render(); }
   }
 
+  function cellVal(col, row){
+    const v=row[col.k];
+    if(col.line){
+      const name=lineName(v);
+      return name===""?"—":name;
+    }
+    if(col.num) return fmtN(v);
+    return (v==null||v==="")?"—":v;
+  }
+  function blockTsv(spec, rows, sets, withCascade){
+    if(!rows||!rows.length) return "";
+    const tagged=prepareRows(spec, rows, sets);
+    const headers=spec.cols.map(c=>c.label);
+    if(withCascade) headers.push("Kaskadiert");
+    const lines=[spec.title, headers.join("\t")];
+    tagged.forEach(({r, implied})=>{
+      const row=spec.cols.map(c=>cellVal(c, r));
+      if(withCascade) row.push(implied?"ja":"nein");
+      lines.push(row.map(tsvCell).join("\t"));
+    });
+    return lines.join("\n");
+  }
+  function copyTsv(){
+    const d=dateEl.value;
+    const dateLabel=fmtDate(d)||d||"—";
+    const dayTrips=[];
+    (DATA.trips||[]).forEach((t,i)=>{
+      if((t.date||"").slice(0,10)===d) dayTrips.push({...t,_i:i});
+    });
+    const parts=[dateLabel, tripsTsv(dayTrips, {route:true})];
+    const buckets=DF[d]||{};
+    const sets=cascadeSets(buckets);
+    const blocks=[];
+    singles.forEach(s=>{
+      const t=blockTsv(s, buckets[s.key]||[], sets, false);
+      if(t) blocks.push(t);
+    });
+    combos.forEach(s=>{
+      const t=blockTsv(s, buckets[s.key]||[], sets, true);
+      if(t) blocks.push(t);
+    });
+    if(blocks.length) parts.push(blocks.join("\n\n"));
+    copyText(parts.join("\n\n"), copyBtn);
+  }
+
   prevBtn.onclick=()=>step(-1);
   nextBtn.onclick=()=>step(1);
   dateEl.onchange=render;
   dateEl.oninput=render;
+  copyBtn.onclick=copyTsv;
   render();
 })();

@@ -64,6 +64,7 @@ __CSS__
       </div>
     </div>
     <button data-tab="map"><span class="ic">🗺️</span> Karte</button>
+    <button data-tab="lines"><span class="ic">🛤️</span> Linien</button>
     <button data-tab="trips"><span class="ic">📋</span> Fahrten</button>
     <button data-tab="vehicles"><span class="ic">🚆</span> Fahrzeuge</button>
     <button data-tab="daily"><span class="ic">🏁</span> Tagesziele</button>
@@ -113,7 +114,17 @@ __CSS__
     <label class="ctl">Datum <input type="date" id="mapDate"></label>
     <span class="muted" id="mapCount"></span>
   </div>
-  <div id="mapview"></div>
+  <div id="mapview">  </div>
+</section>
+
+<section id="lines" class="tab">
+  <div class="tab-head"><h2>Linien</h2>
+    <p>Alle Linien nach Operator – Kanten und Baureihen-Anteile.</p></div>
+  <div class="toolbar">
+    <input type="search" id="linesFilter" placeholder="Suche (Linie, Operator …)">
+    <span class="muted" id="linesCount"></span>
+  </div>
+  <div id="linesBody"></div>
 </section>
 
 <section id="trips" class="tab">
@@ -190,6 +201,7 @@ __CSS__
     <label class="ctl">Datum <input type="date" id="dailyDate"></label>
     <button type="button" class="daily-nav" id="dailyNext" title="Nächster Tag mit Fahrten">›</button>
     <span class="muted" id="dailySummary"></span>
+    <button type="button" class="toolbar-btn" id="dailyCopy">Als TSV kopieren</button>
   </div>
   <div id="dailyBody"></div>
 </section>

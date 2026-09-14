@@ -9,7 +9,8 @@ Träwelling Status Export & Statistik-Dashboard
 `walita.py` ist der Einstiegspunkt: Es lädt die **eigenen Statuses** von
 [Träwelling](https://traewelling.de/api/documentation) (inkl. Zwischenhalte),
 schreibt sie unter `data/` und erzeugt daraus ein in sich geschlossenes
-**HTML-Dashboard**.
+**HTML-Dashboard**. Daneben gibt es einen **Tag-Editor** (`--edit`), der Tags
+und den Status-Text live auf Träwelling ändert.
 
 ![Karte des Dashboards mit Befahrungs-Heatmap](docs/screenshots/02-karte-berlin.jpg)
 
@@ -17,9 +18,10 @@ Die beiden Stufen können auch einzeln genutzt werden:
 
 | Skript | Aufgabe |
 | --- | --- |
-| `walita.py` | Export + Dashboard (empfohlen) |
+| `walita.py` | Export + Dashboard (empfohlen); `--edit` startet den Tag-Editor |
 | `download_statuses.py` | Stufe 1: API → `statuses.json` / `stations.json` / `trips.json` |
 | `build_dashboard.py` | Stufe 2: JSON → `dashboard.html` |
+| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern |
 | `auth.py` | OAuth (Authorization Code + PKCE), von den anderen Skripten genutzt |
 
 ## Installation
@@ -36,8 +38,9 @@ python3 walita.py --demo    # ohne Token ausprobieren
 
 ```
 .
-├── walita.py              # Einstiegspunkt: Export + Dashboard
+├── walita.py              # Einstiegspunkt: Export + Dashboard (+ --edit)
 ├── download_statuses.py   # Stufe 1: Export von der Träwelling-API
+├── status_editor.py       # Tag-Editor (tkinter): Tags + Text live ändern
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
@@ -63,14 +66,17 @@ python3 walita.py --demo    # ohne Token ausprobieren
 
 - Python 3.8+ (nur Standardbibliothek, keine Installation nötig).
 - Zugang zur Träwelling-API auf **einem** von zwei Wegen:
-  - **Personal Access Token** mit dem Scope `read-statuses`
-    (unter <https://traewelling.de/settings/applications>), oder
-  - **OAuth-Login** (`walita.py --login`) – fordert denselben Scope an.
+  - **Personal Access Token** (unter <https://traewelling.de/settings/applications>)
+    mit `read-statuses` für den Export, zusätzlich `write-statuses` für den
+    Tag-Editor, oder
+  - **OAuth-Login** (`walita.py --login`) – Export fordert `read-statuses` an,
+    der Tag-Editor (`walita.py --edit`) `read-statuses write-statuses`.
     Es ist bereits ein öffentlicher Client im Repo hinterlegt; **eigene App in
-    Träwelling registrieren ist nicht nötig.**
+    Träwelling registrieren ist nicht nötig.** Falls der Login `write-statuses`
+    nicht vergibt, einen PAT mit diesem Scope nutzen.
 
-  Walita liest ausschließlich: die eigene Status-Liste und deren Zwischenhalte.
-  Schreibrechte werden nicht angefordert.
+  Export und Dashboard **lesen** nur: die eigene Status-Liste und deren
+  Zwischenhalte. Der Tag-Editor **schreibt** Tags und den Status-Text.
 
 ## Schnellstart
 
@@ -78,6 +84,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 python3 walita.py --login             # einmalig: OAuth, dann Export + Dashboard
 python3 walita.py                     # Update: Token/Caches nutzen, Dashboard öffnen
 python3 walita.py --since 2026-01-01  # nur Fahrten ab dem 02.01.2026
+python3 walita.py --edit              # Tag-Editor (Tags + Text live ändern)
 python3 walita.py --demo              # Demo ohne Token
 ```
 
@@ -111,7 +118,8 @@ kein Dashboard geschrieben. Fortschritt geht auf **stderr**.
 
 Auth-Reihenfolge: `--token` / `TRWL_TOKEN` → gültiges OAuth-Cache-Token →
 Refresh → interaktiver Login. Fehlen am Cache die benötigten Scopes
-(`read-statuses`), wird automatisch neu eingeloggt.
+(`read-statuses`, beim Editor zusätzlich `write-statuses`), wird automatisch
+neu eingeloggt.
 
 ### Export
 
@@ -140,16 +148,19 @@ Refresh → interaktiver Login. Fehlen am Cache die benötigten Scopes
 | --- | --- |
 | `--demo` | Nur Dashboard aus `examples/` bauen – kein API-Download, kein Token |
 | `--dashboard-only` | Export überspringen, Dashboard aus vorhandener `data/` neu bauen |
+| `--edit` | Tag-Editor statt Export + Dashboard (siehe [Tag-Editor](#tag-editor)) |
 
-`--demo` und `--dashboard-only` schließen sich gegenseitig aus. Beide laden nichts
-von der API; zusammen mit einem Anmelde- oder Export-Flag (`--login`, `--since`, …)
-bricht `walita.py` mit einer Meldung ab, statt das Flag stillschweigend zu ignorieren.
+`--demo`, `--dashboard-only` und `--edit` schließen sich gegenseitig aus.
+`--demo` und `--dashboard-only` laden nichts von der API; zusammen mit einem
+Anmelde- oder Export-Flag (`--login`, `--since`, …) bricht `walita.py` mit
+einer Meldung ab, statt das Flag stillschweigend zu ignorieren.
 
 > **Achtung:** `--demo` schreibt nach `data/dashboard.html` und überschreibt damit
 > ein dort liegendes Dashboard aus echten Daten. Mit `--dashboard-only` neu bauen.
 
-Weitere Details und Pfad-Overrides: `python3 download_statuses.py --help` bzw.
-`python3 build_dashboard.py --help`. Version: `python3 walita.py --version`.
+Weitere Details und Pfad-Overrides: `python3 download_statuses.py --help`,
+`python3 build_dashboard.py --help` bzw. `python3 status_editor.py --help`.
+Version: `python3 walita.py --version`.
 
 ## Was der Export erzeugt
 
@@ -222,7 +233,7 @@ Wer bewusst einen eigenen Client nutzen will: `--client-id` /
 
 Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
 (System-Default, Auswahl in `localStorage`). Die Quellen liegen unter
-`dashboard/` und werden beim Erzeugen inline zusammengefügt. Sechs Ansichten:
+`dashboard/` und werden beim Erzeugen inline zusammengefügt. Sieben Ansichten:
 
 - **Übersicht** – Kennzahlen (Check-ins, km, Reisezeit, Punkte, Stationen/Linien,
   Zeitraum) und meistbefahrene Segmente.
@@ -237,6 +248,9 @@ Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
   Richtung. Braucht Internet (Leaflet + Kacheln); der Rest läuft offline.
 
   ![Karte](docs/screenshots/02-karte-berlin.jpg)
+
+- **Linien** – alle Linien gruppiert nach Operator; je Linie die befahrenen
+  gerichteten Kanten und die Anteile der Baureihen (nach Check-ins).
 
 - **Statistiken** – Rankings zu Linien, Baureihen, Fahrzeugen und Stationen
   (Ein-/Ausstieg/Durchfahrt, kombinierbare Filter), Kanten, Wiederholungen,
@@ -277,6 +291,36 @@ python3 build_dashboard.py --open
 python3 build_dashboard.py --statuses x.json --stations y.json -o out.html
 ```
 
+## Tag-Editor
+
+Lokales tkinter-Fenster. Die **Fahrtliste** ist eine Tabelle mit Datum, Linie,
+Von, Nach, **Baureihe** und **Fahrzeugnummer**. Die beiden letzten Spalten
+sind inline editierbar (Enter = nächste Zeile, Tab = nächste Spalte). Änderungen
+bleiben zuerst lokal gestagt (geänderte Zeilen fett). **Speichern** (Ctrl+S)
+öffnet ein Übertragungsfenster (Fahrt für Fahrt: Wartend / Übertrage /
+Gespeichert / Fehler) und schreibt den Diff nach Träwelling (`PUT /status/{id}` nur für `body`; Tags über
+`POST`/`PUT`/`DELETE /status/{id}/tags`). **Dashboard neu bauen** erzeugt
+`data/dashboard.html` aus der Datei (nicht aus ungespeichertem Staging).
+
+Ziel, Sichtbarkeit, Event und der Laufweg bleiben unberührt. In
+`data/statuses.json` werden nach dem Speichern nur `body` und `tags`
+aktualisiert. Weitere Tags (Sitz, Wagen, …) stehen rechts zur gewählten Fahrt.
+
+```bash
+python3 walita.py --edit
+python3 walita.py --edit --login    # OAuth mit read-statuses write-statuses
+python3 status_editor.py            # direkt, gleiche Auth-Flags wie der Export
+```
+
+Die Liste kommt aus `data/statuses.json`, falls vorhanden, sonst von der API.
+„Von API laden“ holt die aktuelle Liste. Tippen in der Tabelle geht nicht
+sofort an den Server; **Speichern** schreibt zuerst nach Träwelling – schlägt
+das fehl, bleibt die lokale Datei unverändert.
+
+Braucht Scope **`write-statuses`**. PAT unter
+<https://traewelling.de/settings/applications> entsprechend ausstellen.
+Beim OAuth-Client 360 muss der Scope erlaubt sein – sonst PAT nutzen.
+
 ## Stufen getrennt nutzen
 
 ```bash
@@ -288,6 +332,7 @@ python3 download_statuses.py --skip-trips
 python3 download_statuses.py --since 2026-01-01
 python3 download_statuses.py --refresh-trips
 python3 download_statuses.py -o export.json
+python3 status_editor.py                         # Tag-Editor
 python3 build_dashboard.py --open
 ```
 
@@ -298,6 +343,9 @@ python3 build_dashboard.py --open
   Fahrt zählt weiter mit, nur ohne Zwischenhalte.
 - **HTTP 403 bei Trips:** meist fehlender Scope `read-statuses` → erneut
   `walita.py --login` bzw. PAT mit diesem Scope neu ausstellen.
+- **HTTP 403 beim Tag-Editor:** meist fehlender Scope `write-statuses` → PAT
+  mit diesem Scope ausstellen oder `--edit --login` (OAuth-Client muss den
+  Scope erlauben).
 - **Rate-Limits:** automatisches Warten bei `429` (Retry-After), leichte Drossel
   zwischen den Anfragen.
 - **Abbruch mit Ctrl-C** ist unbedenklich: der Trip-Cache (`trips.json`) wird auch

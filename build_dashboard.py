@@ -114,6 +114,15 @@ def line_key(line_name, operator):
     return f"{line_name or ''}{LINE_SEP}{operator or ''}"
 
 
+def split_line_key(lk):
+    """Zerlegt den internen Linien-Schlüssel in (name, operator)."""
+    s = lk or ""
+    i = s.find(LINE_SEP)
+    if i < 0:
+        return s, ""
+    return s[:i], s[i + 1:]
+
+
 def delay_bucket(delay):
     """Verspätungs-Bucket-Label für Kreuztabellen."""
     if delay is None:
@@ -1285,6 +1294,44 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
 
     edges_repeat_n = sum(1 for r in all_edge_rows if r["count"] > 1)
 
+    # Katalogseite „Linien“: alle Kanten je Linie + Baureihen-Anteile (Fahrten).
+    line_edges_map = {}
+    for (line, a_id, b_id), c in line_edge.items():
+        fn, tn = edge_names_for(a_id, b_id)
+        line_edges_map.setdefault(line, []).append([fn, tn, c.count])
+    for edges in line_edges_map.values():
+        edges.sort(key=lambda e: (-e[2], e[0], e[1]))
+
+    line_catalog = []
+    for lk, agg in line_aggs.items():
+        if not lk:
+            continue
+        _name, operator = split_line_key(lk)
+        tagged = sum(agg.loc_class_counts.values())
+        untagged = max(0, agg.count - tagged)
+        loc_classes = [[k, n] for k, n in agg.loc_class_counts.most_common()]
+        if untagged:
+            loc_classes.append(["", untagged])
+        line_catalog.append({
+            "key": lk,
+            "operator": operator,
+            "count": agg.count,
+            "distanceKm": round(agg.distance_km, 1),
+            "locClasses": loc_classes,
+            "edges": line_edges_map.get(lk, []),
+        })
+    op_km = {}
+    for row in line_catalog:
+        op_km[row["operator"]] = op_km.get(row["operator"], 0) + row["distanceKm"]
+    line_catalog.sort(
+        key=lambda r: (
+            -op_km[r["operator"]],
+            r["operator"],
+            split_line_key(r["key"])[0].casefold(),
+            r["key"],
+        )
+    )
+
     stats = {
         "extra": {
             "lines": len(line_aggs),
@@ -1477,6 +1524,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         prev = last_leader.get(loc)
         if new_leader and prev and new_leader != prev:
             top_km, top_n = veh_stats[new_leader]
+            prev_km, prev_n = veh_stats[prev]
             _push_day(
                 daily_firsts,
                 rec.get("date") or "",
@@ -1484,9 +1532,11 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 {
                     "vehicle": new_leader,
                     "locClass": loc,
-                    "prevVehicle": prev,
                     "km": round(top_km, 1),
                     "count": top_n,
+                    "prevVehicle": prev,
+                    "prevKm": round(prev_km, 1),
+                    "prevCount": prev_n,
                 },
             )
         if new_leader:
@@ -1507,6 +1557,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         "kpis": kpis,
         "trips": trips,
         "vehicles": vehicle_records,
+        "lines": line_catalog,
         "lineColors": line_colors,
         "stations": map_stations,
         "variants": variants,
@@ -1538,6 +1589,7 @@ _JS_FILES = (
     "js/map.js",
     "js/trips.js",
     "js/vehicles.js",
+    "js/lines.js",
     "js/daily.js",
 )
 

@@ -50,11 +50,13 @@ def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
-def api_get(path_or_url, token, params=None):
-    """Führt einen GET-Request gegen die API aus und gibt das geparste JSON zurück.
+def api_request(method, path_or_url, token, params=None, json_body=None):
+    """Führt einen HTTP-Request gegen die API aus und gibt das geparste JSON zurück.
 
     `path_or_url` darf ein Pfad ("/auth/user") oder eine vollständige URL sein
-    (z. B. aus `links.next`). Behandelt 429 (Rate-Limit) und 5xx mit Retry.
+    (z. B. aus `links.next`). `json_body` wird als JSON-Body gesendet (PUT/POST).
+    Leere Antworten (z. B. 204) ergeben `{}`. Behandelt 429 (Rate-Limit) und
+    5xx mit Retry; andere 4xx werden als `ApiError` geworfen.
     """
     if path_or_url.startswith("http"):
         url = path_or_url
@@ -68,10 +70,14 @@ def api_get(path_or_url, token, params=None):
         "Accept": "application/json",
         "User-Agent": USER_AGENT,
     }
+    data = None
+    if json_body is not None:
+        data = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
 
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
-        req = urllib.request.Request(url, headers=headers, method="GET")
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 raw = resp.read().decode("utf-8")
@@ -99,6 +105,11 @@ def api_get(path_or_url, token, params=None):
             time.sleep(wait)
 
     raise ApiError(None, f"Maximale Versuche erschöpft: {last_error}")
+
+
+def api_get(path_or_url, token, params=None):
+    """GET-Request gegen die API; siehe `api_request`."""
+    return api_request("GET", path_or_url, token, params=params)
 
 
 def url_with_query(path_or_url, extra):

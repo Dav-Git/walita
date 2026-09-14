@@ -40,6 +40,10 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── download_statuses.py   # Stufe 1: Export von der Träwelling-API
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
+├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
+│   ├── template.html
+│   ├── style.css
+│   └── js/
 ├── version.py             # Version + User-Agent
 ├── operator_replacements.json  # manuelle Operator-Namen-Ersetzungen
 ├── loc_class_families.txt      # Baureihe → Familie (Kartenfilter)
@@ -217,7 +221,8 @@ Wer bewusst einen eigenen Client nutzen will: `--client-id` /
 ## Dashboard (GUI)
 
 Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
-(System-Default, Auswahl in `localStorage`). Sechs Ansichten:
+(System-Default, Auswahl in `localStorage`). Die Quellen liegen unter
+`dashboard/` und werden beim Erzeugen inline zusammengefügt. Sechs Ansichten:
 
 - **Übersicht** – Kennzahlen (Check-ins, km, Reisezeit, Punkte, Stationen/Linien,
   Zeitraum) und meistbefahrene Segmente.

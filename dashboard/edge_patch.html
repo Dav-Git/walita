@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kante anreichern – Walita</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+  :root { --bg:#0b1220; --panel:#141d2e; --fg:#e7eef8; --muted:#93a2b8;
+          --accent:#5b95f7; --border:#28344c; --ok:#4ade80; --warn:#fbbf24; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; }
+  body { display:flex; min-height:100%; }
+  aside { width:320px; flex:0 0 320px; background:var(--panel); border-right:1px solid var(--border);
+    display:flex; flex-direction:column; padding:16px; gap:12px; overflow:auto; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .route { font-weight:600; }
+  .chip { display:inline-flex; align-items:center; gap:6px; background:#1b2740; border:1px solid var(--border);
+    border-radius:999px; padding:2px 8px; margin:2px; font-size:12px; }
+  .chip button { background:none; border:0; color:var(--muted); cursor:pointer; padding:0; font-size:14px; }
+  #viaList { min-height:2em; }
+  .btns { display:flex; flex-direction:column; gap:8px; margin-top:auto; }
+  button.act { background:var(--accent); color:#0b1220; border:0; border-radius:8px;
+    padding:10px 12px; font-weight:600; cursor:pointer; }
+  button.act.secondary { background:#1b2740; color:var(--fg); border:1px solid var(--border); }
+  button.act:disabled { opacity:.5; cursor:not-allowed; }
+  #msg { min-height:1.3em; font-size:13px; }
+  #msg.ok { color:var(--ok); }
+  #msg.err { color:#ff6b74; }
+  #map { flex:1; }
+  .legend { font-size:12px; color:var(--muted); }
+  .src { font-size:12px; }
+  .addrow { display:flex; gap:6px; }
+  .addrow input { flex:1; min-width:0; background:#0b1220; color:var(--fg);
+    border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:inherit; }
+  .addrow input:focus { outline:1px solid var(--accent); }
+  #hits { max-height:160px; overflow:auto; border:1px solid var(--border);
+    border-radius:8px; background:#0b1220; display:none; }
+  #hits button { display:block; width:100%; text-align:left; background:none; border:0;
+    color:var(--fg); padding:6px 10px; cursor:pointer; font:inherit; }
+  #hits button:hover { background:#1b2740; }
+  #hits .meta { color:var(--muted); font-size:11px; }
+</style>
+</head>
+<body>
+<aside>
+  <div>
+    <h1>Kante anreichern</h1>
+    <div class="muted">Nur lokal – kein Upload nach Träwelling. Internet nur für Kacheln.</div>
+  </div>
+  <div>
+    <div class="route" id="route">…</div>
+    <div class="src muted" id="source"></div>
+  </div>
+  <div>
+    <div class="muted">Via (Klick auf der Karte, Reihenfolge = Klickfolge)</div>
+    <div id="viaList"></div>
+  </div>
+  <button type="button" class="act secondary" id="btnSort">Nach Strecke sortieren</button>
+  <button type="button" class="act secondary" id="btnClear">Via leeren</button>
+  <div>
+    <div class="muted">Außerhalb des Korridors: Name oder Stations-ID</div>
+    <div class="addrow">
+      <input id="q" type="search" placeholder="Station suchen …" autocomplete="off">
+    </div>
+    <div id="hits"></div>
+  </div>
+  <div class="legend">
+    Start/Ziel · Korridor 20 km um die Luftlinie klickbar · weitere Stationen per Suche.
+    Bediente Halte dieser Fahrt sind keine Via.
+  </div>
+  <div class="btns">
+    <button type="button" class="act" id="btnDefault">Standard für diese Kante</button>
+    <button type="button" class="act secondary" id="btnTrip">Nur diese Fahrt</button>
+    <div id="msg"></div>
+  </div>
+</aside>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(function(){
+  const viaListEl=document.getElementById("viaList");
+  const routeEl=document.getElementById("route");
+  const sourceEl=document.getElementById("source");
+  const msgEl=document.getElementById("msg");
+  const qEl=document.getElementById("q");
+  const hitsEl=document.getElementById("hits");
+  let ctx=null;
+  let via=[];
+  let stationById=new Map();
+  let markers=new Map();
+  let line=null;
+
+  const map=L.map("map",{preferCanvas:true,maxZoom:19}).setView([51,10],6);
+  const PROVIDERS=[
+    {url:"https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+     opts:{maxZoom:19, maxNativeZoom:16, attribution:"&copy; Esri, HERE, Garmin"}},
+    {url:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+     opts:{maxZoom:19, maxNativeZoom:19, subdomains:"abc",
+       referrerPolicy:"unsafe-url", attribution:"&copy; OpenStreetMap"}},
+    {url:"https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+     opts:{maxZoom:19, maxNativeZoom:17, subdomains:"abc", attribution:"&copy; OpenTopoMap (CC-BY-SA)"}},
+  ];
+  let baseLayer=null, tileErrors=0;
+  function useProvider(i){
+    if(baseLayer) map.removeLayer(baseLayer);
+    const p=PROVIDERS[i]; tileErrors=0;
+    baseLayer=L.tileLayer(p.url, Object.assign(
+      {referrerPolicy:"strict-origin-when-cross-origin"}, p.opts));
+    baseLayer.on("tileerror", ()=>{
+      if(++tileErrors>6 && i+1<PROVIDERS.length){ useProvider(i+1); }
+    });
+    baseLayer.addTo(map);
+  }
+  useProvider(0);
+
+  function setMsg(text, kind){
+    msgEl.textContent=text||"";
+    msgEl.className=kind||"";
+  }
+  function sid(v){ return v==null?"":String(v); }
+  function nameOf(id){
+    const st=stationById.get(sid(id));
+    return (st&&st.name)||String(id);
+  }
+  function paintVia(){
+    viaListEl.innerHTML="";
+    if(!via.length){
+      const empty=document.createElement("div");
+      empty.className="muted";
+      empty.textContent="Keine Via-Stationen.";
+      viaListEl.appendChild(empty);
+      return;
+    }
+    via.forEach((id,i)=>{
+      const chip=document.createElement("span");
+      chip.className="chip";
+      chip.textContent=(i+1)+". "+nameOf(id);
+      const rm=document.createElement("button");
+      rm.type="button";
+      rm.textContent="×";
+      rm.title="Entfernen";
+      rm.onclick=()=>{ via=via.filter(x=>sid(x)!==sid(id)); paintVia(); paintMarkers(); };
+      chip.appendChild(rm);
+      viaListEl.appendChild(chip);
+    });
+  }
+  function styleFor(st){
+    const id=sid(st.id);
+    const fromId=sid(ctx.from&&ctx.from.id);
+    const toId=sid(ctx.to&&ctx.to.id);
+    const idx=via.findIndex(x=>sid(x)===id);
+    if(id===fromId||id===toId){
+      return {radius:8, color:"#0b1220", fillColor:"#5b95f7", weight:2, fillOpacity:1};
+    }
+    if(idx>=0){
+      return {radius:7, color:"#0b1220", fillColor:"#4ade80", weight:2, fillOpacity:1};
+    }
+    const served=(ctx.servedIds||[]).some(x=>sid(x)===id);
+    if(served){
+      return {radius:4, color:"#33475b", fillColor:"#64748b", weight:1, fillOpacity:.7};
+    }
+    return {radius:5, color:"#33475b", fillColor:"#93a2b8", weight:1, fillOpacity:.85};
+  }
+  function popupFor(st){
+    const id=sid(st.id);
+    const idx=via.findIndex(x=>sid(x)===id);
+    const fromId=sid(ctx.from&&ctx.from.id);
+    const toId=sid(ctx.to&&ctx.to.id);
+    if(id===fromId) return "<b>"+esc(st.name)+"</b><br>Start";
+    if(id===toId) return "<b>"+esc(st.name)+"</b><br>Ziel";
+    if(idx>=0) return "<b>"+esc(st.name)+"</b><br>Via "+(idx+1);
+    const served=(ctx.servedIds||[]).some(x=>sid(x)===id);
+    if(served) return "<b>"+esc(st.name)+"</b><br>bereits Halt dieser Fahrt";
+    return "<b>"+esc(st.name)+"</b><br>Klick: als Via hinzufügen";
+  }
+  function esc(s){
+    return String(s==null?"":s).replace(/[&<>"']/g, c=>({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
+  }
+  function paintMarkers(){
+    markers.forEach(m=>m.remove());
+    markers.clear();
+    if(line){ line.remove(); line=null; }
+    if(!ctx) return;
+    const a=ctx.from, b=ctx.to;
+    if(a&&a.lat!=null&&b&&b.lat!=null){
+      const latlngs=[[a.lat,a.lon]];
+      via.forEach(id=>{
+        const st=stationById.get(sid(id));
+        if(st&&st.lat!=null) latlngs.push([st.lat,st.lon]);
+      });
+      latlngs.push([b.lat,b.lon]);
+      line=L.polyline(latlngs,{color:"#5b95f7",weight:4,opacity:.85}).addTo(map);
+    }
+    const all=[];
+    if(ctx.from) all.push(ctx.from);
+    (ctx.stations||[]).forEach(s=>all.push(s));
+    if(ctx.to) all.push(ctx.to);
+    all.forEach(st=>{
+      if(st.lat==null||st.lon==null) return;
+      const m=L.circleMarker([st.lat,st.lon], styleFor(st))
+        .bindPopup(popupFor(st))
+        .addTo(map);
+      m.on("click", ()=>onStationClick(st));
+      markers.set(sid(st.id), m);
+    });
+  }
+  function onStationClick(st){
+    const i=via.findIndex(x=>sid(x)===sid(st.id));
+    if(i>=0){
+      via.splice(i,1);
+      paintVia();
+      paintMarkers();
+      return;
+    }
+    addViaStation(st);
+  }
+  function rememberStation(st){
+    if(!st||st.id==null) return;
+    stationById.set(sid(st.id), st);
+    if(!ctx.stations) ctx.stations=[];
+    if(!ctx.stations.some(s=>sid(s.id)===sid(st.id))) ctx.stations.push(st);
+  }
+  function addViaStation(st, opts){
+    opts=opts||{};
+    if(!ctx||!st) return false;
+    const id=st.id;
+    const fromId=ctx.from&&ctx.from.id, toId=ctx.to&&ctx.to.id;
+    if(sid(id)===sid(fromId)||sid(id)===sid(toId)){
+      setMsg("Start und Ziel können keine Via sein.", "err");
+      return false;
+    }
+    if((ctx.servedIds||[]).some(x=>sid(x)===sid(id))){
+      setMsg("Bereits Halt dieser Fahrt – keine Via.", "err");
+      return false;
+    }
+    rememberStation(st);
+    if(via.some(x=>sid(x)===sid(id))){
+      setMsg(nameOf(id)+" ist schon Via.", "ok");
+      return true;
+    }
+    via.push(id);
+    paintVia();
+    paintMarkers();
+    if(opts.pan && st.lat!=null){
+      map.panTo([st.lat, st.lon]);
+    }
+    setMsg(nameOf(id)+" als Via übernommen.", "ok");
+    return true;
+  }
+  function sortByTrack(){
+    via.sort((a,b)=>{
+      const sa=stationById.get(sid(a)), sb=stationById.get(sid(b));
+      const ta=sa&&sa.t!=null?sa.t:0, tb=sb&&sb.t!=null?sb.t:0;
+      return ta-tb;
+    });
+    paintVia();
+    paintMarkers();
+  }
+  async function save(mode){
+    setMsg("Speichere …");
+    try{
+      const res=await fetch("/api/save",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({mode, via}),
+      });
+      const data=await res.json();
+      if(!data.ok){
+        setMsg(data.error||"Speichern fehlgeschlagen.", "err");
+        return;
+      }
+      const label=mode==="default"?"Standard für diese Kante":"nur diese Fahrt";
+      setMsg("Gespeichert ("+label+").", "ok");
+      sourceEl.textContent=mode==="default"?"Quelle: Standard":"Quelle: Fahrt-Override";
+    }catch(e){
+      setMsg("Netzwerkfehler: "+e, "err");
+    }
+  }
+  document.getElementById("btnSort").onclick=sortByTrack;
+  document.getElementById("btnClear").onclick=()=>{ via=[]; paintVia(); paintMarkers(); };
+  document.getElementById("btnDefault").onclick=()=>save("default");
+  document.getElementById("btnTrip").onclick=()=>save("trip");
+
+  let searchTimer=null, lastHits=[];
+  function hideHits(){ hitsEl.style.display="none"; hitsEl.innerHTML=""; }
+  function showHits(rows){
+    lastHits=rows||[];
+    if(!lastHits.length){
+      hitsEl.innerHTML='<div class="muted" style="padding:8px 10px">Keine Treffer in stations.json.</div>';
+      hitsEl.style.display="block";
+      return;
+    }
+    hitsEl.innerHTML="";
+    lastHits.forEach(st=>{
+      const btn=document.createElement("button");
+      btn.type="button";
+      const dist=st.distKm!=null?` · ${st.distKm} km zur Sehne`:"";
+      btn.innerHTML=`${esc(st.name)}<div class="meta">ID ${esc(st.id)}${esc(dist)}</div>`;
+      btn.onclick=()=>{
+        addViaStation(st, {pan:true});
+        qEl.value="";
+        hideHits();
+      };
+      hitsEl.appendChild(btn);
+    });
+    hitsEl.style.display="block";
+  }
+  async function runSearch(q){
+    q=(q||"").trim();
+    if(!q){ hideHits(); return; }
+    if(q.length<2 && !/^\d+$/.test(q)){ hideHits(); return; }
+    try{
+      const res=await fetch("/api/search?q="+encodeURIComponent(q));
+      const data=await res.json();
+      showHits(data.stations||[]);
+    }catch(e){
+      setMsg("Suche fehlgeschlagen: "+e, "err");
+    }
+  }
+  qEl.addEventListener("input", ()=>{
+    clearTimeout(searchTimer);
+    searchTimer=setTimeout(()=>runSearch(qEl.value), 200);
+  });
+  qEl.addEventListener("keydown", e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      if(lastHits.length){
+        addViaStation(lastHits[0], {pan:true});
+        qEl.value="";
+        hideHits();
+      }else{
+        runSearch(qEl.value);
+      }
+    }
+    if(e.key==="Escape") hideHits();
+  });
+
+  fetch("/api/context").then(r=>r.json()).then(data=>{
+    ctx=data;
+    stationById.clear();
+    if(data.from) stationById.set(sid(data.from.id), data.from);
+    if(data.to) stationById.set(sid(data.to.id), data.to);
+    (data.stations||[]).forEach(s=>stationById.set(sid(s.id), s));
+    via=Array.isArray(data.via)?data.via.slice():[];
+    routeEl.textContent=(data.from&&data.from.name||"?")+" → "+(data.to&&data.to.name||"?");
+    const src=data.source==="override"?"Quelle: Fahrt-Override"
+      :data.source==="default"?"Quelle: Standard":"Quelle: kein Patch";
+    sourceEl.textContent=src;
+    const km=data.corridorKm||20;
+    const legend=document.querySelector(".legend");
+    if(legend){
+      legend.textContent="Start/Ziel · Korridor "+km+" km um die Luftlinie klickbar · weitere Stationen per Suche. Bediente Halte dieser Fahrt sind keine Via.";
+    }
+    paintVia();
+    paintMarkers();
+    const pts=[];
+    if(data.from&&data.from.lat!=null) pts.push([data.from.lat, data.from.lon]);
+    if(data.to&&data.to.lat!=null) pts.push([data.to.lat, data.to.lon]);
+    (data.stations||[]).forEach(s=>{ if(s.lat!=null) pts.push([s.lat,s.lon]); });
+    if(pts.length){
+      map.fitBounds(pts, {padding:[28,28], maxZoom:14});
+    }else{
+      setMsg("Start oder Ziel ohne Koordinaten – Karte leer.", "err");
+    }
+  }).catch(e=>setMsg("Kontext nicht ladbar: "+e, "err"));
+})();
+</script>
+</body>
+</html>

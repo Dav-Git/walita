@@ -118,6 +118,21 @@ def main(argv=None):
              "(Default: loc_class_families.txt; JSON-Objekt, "
              "gleiche Baureihe darf mehrfach vorkommen).",
     )
+    dash.add_argument(
+        "--edge-patches", default="data/edge_patches.json",
+        help="Lokale Via-Patches für grobe Kanten "
+             "(Default: data/edge_patches.json; fehlende Datei = keine Expansion).",
+    )
+    dash.add_argument(
+        "--station-patches", default="data/station_patches.json",
+        help="Lokale Stations-Patches (Koordinaten/Merges) "
+             "(Default: data/station_patches.json; fehlende Datei = keine Änderung).",
+    )
+    dash.add_argument(
+        "--line-color-patches", default="data/line_color_patches.json",
+        help="Lokale Linienfarben-Patches je Status "
+             "(Default: data/line_color_patches.json; fehlende Datei = keine Änderung).",
+    )
 
     mode = parser.add_argument_group("Modus")
     # Beide Modi überspringen den Export – gemeinsam angegeben wäre unklar, welcher gilt.
@@ -189,6 +204,9 @@ def main(argv=None):
         if args.ignore_plus:
             edit_argv.append("--ignore-plus")
         edit_argv.extend(["--loc-class-families", args.loc_class_families])
+        edit_argv.extend(["--edge-patches", args.edge_patches])
+        edit_argv.extend(["--station-patches", args.station_patches])
+        edit_argv.extend(["--line-color-patches", args.line_color_patches])
         return status_editor.main(edit_argv)
 
     if args.demo:
@@ -202,6 +220,9 @@ def main(argv=None):
         if args.ignore_plus:
             dash_argv.append("--ignore-plus")
         dash_argv.extend(["--loc-class-families", args.loc_class_families])
+        dash_argv.extend(["--edge-patches", args.edge_patches])
+        dash_argv.extend(["--station-patches", args.station_patches])
+        dash_argv.extend(["--line-color-patches", args.line_color_patches])
         return build_dashboard.main(dash_argv)
 
     if not args.dashboard_only:
@@ -241,6 +262,9 @@ def main(argv=None):
     if args.ignore_plus:
         dash_argv.append("--ignore-plus")
     dash_argv.extend(["--loc-class-families", args.loc_class_families])
+    dash_argv.extend(["--edge-patches", args.edge_patches])
+    dash_argv.extend(["--station-patches", args.station_patches])
+    dash_argv.extend(["--line-color-patches", args.line_color_patches])
     return build_dashboard.main(dash_argv)
 
 

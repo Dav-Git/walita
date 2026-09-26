@@ -1,225 +1,278 @@
 <!DOCTYPE html>
 <html lang="de">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Walita Dashboard</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-<style>
-__CSS__
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Walita Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    __CSS__
+  </style>
 </head>
+
 <body>
-<aside class="sidebar">
-  <div class="brand">
-    <div class="logo"><span class="mark">🚆</span> Walita</div>
-  </div>
-  <nav class="navlist">
-    <button data-tab="overview" class="active"><span class="ic">📊</span> Übersicht</button>
-    <div class="nav-group" id="navStats">
-      <button data-tab="stats"><span class="ic">📈</span> Statistiken</button>
-      <div class="nav-sub">
-        <a href="#stats-extra" data-jump="stats-extra">Überblick</a>
-        <a href="#stats-lines" data-jump="stats-lines">Linien</a>
-        <a href="#stats-loc" data-jump="stats-loc">Baureihen</a>
-        <a href="#stats-veh" data-jump="stats-veh">Fahrzeuge</a>
-        <div class="nav-sec">
-          <a href="#stats-stations" data-jump="stats-stations" class="nav-sec-head">Stationen</a>
-          <a href="#stats-stations" data-jump="stats-stations" data-station-sort="boarded" class="nav-leaf">Häufigste Einstiege</a>
-          <a href="#stats-stations" data-jump="stats-stations" data-station-sort="alighted" class="nav-leaf">Häufigste Ausstiege</a>
-          <a href="#stats-stations" data-jump="stats-stations" data-station-sort="through" class="nav-leaf">Häufigste Durchfahrten</a>
-        </div>
-        <div class="nav-sec">
-          <a href="#stats-edges" data-jump="stats-edges" class="nav-sec-head">Kanten</a>
-          <a href="#stats-edges-by-count" data-jump="stats-edges-by-count" class="nav-leaf">Häufigste Kanten</a>
-          <a href="#stats-edges-by-days" data-jump="stats-edges-by-days" class="nav-leaf">Am längsten nicht befahren</a>
-          <a href="#stats-edges-by-last" data-jump="stats-edges-by-last" class="nav-leaf">Zuletzt befahren</a>
-          <a href="#stats-edges-by-first" data-jump="stats-edges-by-first" class="nav-leaf">Älteste Erstbefahrung</a>
-          <a href="#stats-edges-by-first-new" data-jump="stats-edges-by-first-new" class="nav-leaf">Jüngste Erstbefahrung</a>
-          <a href="#stats-edges-once" data-jump="stats-edges-once" class="nav-leaf">Vergessene Einmal-Kanten</a>
-        </div>
-        <div class="nav-sec">
-          <a href="#stats-repeat" data-jump="stats-repeat" class="nav-sec-head">Wiederholungen</a>
-          <a href="#stats-repeat-veh-edge" data-jump="stats-repeat-veh-edge" class="nav-leaf">Fahrzeug × Kante</a>
-          <a href="#stats-repeat-veh-edge-line" data-jump="stats-repeat-veh-edge-line" class="nav-leaf">Fahrzeug × Kante × Linie</a>
-          <a href="#stats-repeat-line-edge" data-jump="stats-repeat-line-edge" class="nav-leaf">Linie × Kante</a>
-          <a href="#stats-repeat-loc-edge" data-jump="stats-repeat-loc-edge" class="nav-leaf">Baureihe × Kante</a>
-          <a href="#stats-repeat-multi-veh" data-jump="stats-repeat-multi-veh" class="nav-leaf">Kanten mit mehreren Fahrzeugen</a>
-        </div>
-        <div class="nav-sec">
-          <a href="#stats-cross" data-jump="stats-cross" class="nav-sec-head">Kreuztabellen</a>
-          <a href="#stats-cross-loc-line" data-jump="stats-cross-loc-line" class="nav-leaf">Baureihe × Linie</a>
-          <a href="#stats-cross-veh-line" data-jump="stats-cross-veh-line" class="nav-leaf">Fahrzeug × Linie</a>
-          <a href="#stats-cross-line-month" data-jump="stats-cross-line-month" class="nav-leaf">Linie × Monat</a>
-          <a href="#stats-cross-line-weekday" data-jump="stats-cross-line-weekday" class="nav-leaf">Linie × Wochentag</a>
-          <a href="#stats-cross-loc-month" data-jump="stats-cross-loc-month" class="nav-leaf">Baureihe × Monat</a>
-          <a href="#stats-cross-loc-weekday" data-jump="stats-cross-loc-weekday" class="nav-leaf">Baureihe × Wochentag</a>
-          <a href="#stats-cross-loc-category" data-jump="stats-cross-loc-category" class="nav-leaf">Baureihe × Kategorie</a>
-          <a href="#stats-cross-line-category" data-jump="stats-cross-line-category" class="nav-leaf">Linie × Kategorie</a>
-          <a href="#stats-cross-line-delay" data-jump="stats-cross-line-delay" class="nav-leaf">Linie × Verspätung</a>
-          <a href="#stats-cross-loc-delay" data-jump="stats-cross-loc-delay" class="nav-leaf">Baureihe × Verspätung</a>
-          <a href="#stats-cross-veh-month" data-jump="stats-cross-veh-month" class="nav-leaf">Fahrzeug × Monat</a>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo"><span class="mark">🚆</span> Walita</div>
+    </div>
+    <nav class="navlist">
+      <button data-tab="overview" class="active"><span class="ic">📊</span> Übersicht</button>
+      <div class="nav-group" id="navStats">
+        <button data-tab="stats"><span class="ic">📈</span> Statistiken</button>
+        <div class="nav-sub">
+          <a href="#stats-extra" data-jump="stats-extra">Überblick</a>
+          <a href="#stats-lines" data-jump="stats-lines">Linien</a>
+          <a href="#stats-loc" data-jump="stats-loc">Baureihen</a>
+          <a href="#stats-veh" data-jump="stats-veh">Fahrzeuge</a>
+          <div class="nav-sec">
+            <a href="#stats-stations" data-jump="stats-stations" class="nav-sec-head">Stationen</a>
+            <a href="#stats-stations" data-jump="stats-stations" data-station-sort="boarded" class="nav-leaf">Häufigste
+              Einstiege</a>
+            <a href="#stats-stations" data-jump="stats-stations" data-station-sort="alighted" class="nav-leaf">Häufigste
+              Ausstiege</a>
+            <a href="#stats-stations" data-jump="stats-stations" data-station-sort="through" class="nav-leaf">Häufigste
+              gehaltene Halte</a>
+            <a href="#stats-stations" data-jump="stats-stations" data-station-sort="passed" class="nav-leaf">Häufigste
+              physische Durchfahrten</a>
+          </div>
+          <div class="nav-sec">
+            <a href="#stats-edges" data-jump="stats-edges" class="nav-sec-head">Kanten</a>
+            <a href="#stats-edges-by-count" data-jump="stats-edges-by-count" class="nav-leaf">Häufigste Kanten</a>
+            <a href="#stats-edges-by-days" data-jump="stats-edges-by-days" class="nav-leaf">Am längsten nicht
+              befahren</a>
+            <a href="#stats-edges-by-last" data-jump="stats-edges-by-last" class="nav-leaf">Zuletzt befahren</a>
+            <a href="#stats-edges-by-first" data-jump="stats-edges-by-first" class="nav-leaf">Älteste Erstbefahrung</a>
+            <a href="#stats-edges-by-first-new" data-jump="stats-edges-by-first-new" class="nav-leaf">Jüngste
+              Erstbefahrung</a>
+            <a href="#stats-edges-once" data-jump="stats-edges-once" class="nav-leaf">Vergessene Einmal-Kanten</a>
+          </div>
+          <div class="nav-sec">
+            <a href="#stats-repeat" data-jump="stats-repeat" class="nav-sec-head">Wiederholungen</a>
+            <a href="#stats-repeat-veh-edge" data-jump="stats-repeat-veh-edge" class="nav-leaf">Fahrzeug × Kante</a>
+            <a href="#stats-repeat-veh-edge-line" data-jump="stats-repeat-veh-edge-line" class="nav-leaf">Fahrzeug ×
+              Kante × Linie</a>
+            <a href="#stats-repeat-line-edge" data-jump="stats-repeat-line-edge" class="nav-leaf">Linie × Kante</a>
+            <a href="#stats-repeat-loc-edge" data-jump="stats-repeat-loc-edge" class="nav-leaf">Baureihe × Kante</a>
+            <a href="#stats-repeat-multi-veh" data-jump="stats-repeat-multi-veh" class="nav-leaf">Kanten mit mehreren
+              Fahrzeugen</a>
+          </div>
+          <div class="nav-sec">
+            <a href="#stats-cross" data-jump="stats-cross" class="nav-sec-head">Kreuztabellen</a>
+            <a href="#stats-cross-loc-line" data-jump="stats-cross-loc-line" class="nav-leaf">Baureihe × Linie</a>
+            <a href="#stats-cross-veh-line" data-jump="stats-cross-veh-line" class="nav-leaf">Fahrzeug × Linie</a>
+            <a href="#stats-cross-line-month" data-jump="stats-cross-line-month" class="nav-leaf">Linie × Monat</a>
+            <a href="#stats-cross-line-weekday" data-jump="stats-cross-line-weekday" class="nav-leaf">Linie ×
+              Wochentag</a>
+            <a href="#stats-cross-loc-month" data-jump="stats-cross-loc-month" class="nav-leaf">Baureihe × Monat</a>
+            <a href="#stats-cross-loc-weekday" data-jump="stats-cross-loc-weekday" class="nav-leaf">Baureihe ×
+              Wochentag</a>
+            <a href="#stats-cross-loc-category" data-jump="stats-cross-loc-category" class="nav-leaf">Baureihe ×
+              Kategorie</a>
+            <a href="#stats-cross-line-category" data-jump="stats-cross-line-category" class="nav-leaf">Linie ×
+              Kategorie</a>
+            <a href="#stats-cross-line-delay" data-jump="stats-cross-line-delay" class="nav-leaf">Linie × Verspätung</a>
+            <a href="#stats-cross-loc-delay" data-jump="stats-cross-loc-delay" class="nav-leaf">Baureihe ×
+              Verspätung</a>
+            <a href="#stats-cross-veh-month" data-jump="stats-cross-veh-month" class="nav-leaf">Fahrzeug × Monat</a>
+          </div>
         </div>
       </div>
+      <button data-tab="map"><span class="ic">🗺️</span> Karte</button>
+      <button data-tab="lines"><span class="ic">🛤️</span> Linien</button>
+      <button data-tab="trips"><span class="ic">📋</span> Fahrten</button>
+      <button data-tab="vehicles"><span class="ic">🚆</span> Fahrzeuge</button>
+      <button data-tab="daily"><span class="ic">🏁</span> Tagesziele</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="sub" id="subtitle"></div>
+      <div class="sub built-at" id="builtAt"></div>
+      <button class="theme-toggle" id="themeToggle" title="Hell/Dunkel umschalten">
+        <span id="themeIcon">🌙</span> <span id="themeLabel">Dunkel</span>
+      </button>
     </div>
-    <button data-tab="map"><span class="ic">🗺️</span> Karte</button>
-    <button data-tab="lines"><span class="ic">🛤️</span> Linien</button>
-    <button data-tab="trips"><span class="ic">📋</span> Fahrten</button>
-    <button data-tab="vehicles"><span class="ic">🚆</span> Fahrzeuge</button>
-    <button data-tab="daily"><span class="ic">🏁</span> Tagesziele</button>
-  </nav>
-  <div class="sidebar-foot">
-    <div class="sub" id="subtitle"></div>
-    <button class="theme-toggle" id="themeToggle" title="Hell/Dunkel umschalten">
-      <span id="themeIcon">🌙</span> <span id="themeLabel">Dunkel</span>
-    </button>
+  </aside>
+
+  <main>
+    <section id="overview" class="tab active">
+      <div class="tab-head">
+        <h2>Übersicht</h2>
+        <p>Kennzahlen und meistbefahrene Segmente.</p>
+      </div>
+      <div class="cards" id="kpis"></div>
+      <div class="panel" id="segpanel" style="margin-top:24px">
+        <h3>Meistbefahrene Segmente</h3>
+        <p class="hint" style="margin:0 0 10px;color:var(--muted);font-size:13px">Zunächst 30 Einträge.</p>
+        <table id="segtable">
+          <thead>
+            <tr>
+              <th>Von</th>
+              <th>Nach</th>
+              <th>Anzahl</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="stats" class="tab">
+      <div class="tab-head">
+        <h2>Statistiken</h2>
+        <p>Linien, Baureihen, Fahrzeuge und Stationen – Rankings, Unique-Kombis und Kreuztabellen.</p>
+      </div>
+      <div id="stats-extra" class="stats-sec"></div>
+      <div id="stats-lines" class="stats-sec"></div>
+      <div id="stats-loc" class="stats-sec"></div>
+      <div id="stats-veh" class="stats-sec"></div>
+      <div id="stats-stations" class="stats-sec"></div>
+      <div id="stats-edges" class="stats-sec"></div>
+      <div id="stats-repeat" class="stats-sec"></div>
+      <div id="stats-cross" class="stats-sec"></div>
+    </section>
+
+    <section id="map" class="tab">
+      <div class="tab-head">
+        <h2>Karte</h2>
+        <p>Gerichtete Befahrungs-Heatmap – filterbar nach Fahrt-Attributen.</p>
+      </div>
+      <div class="toolbar">
+        <label class="ctl">Linie <select id="mapLine"></select></label>
+        <label class="ctl">Baureihe <select id="mapLoc"></select></label>
+        <label class="ctl">Fahrzeug <select id="mapVehicle"></select></label>
+        <label class="ctl">Kategorie <select id="mapCat"></select></label>
+        <label class="ctl">Operator <select id="mapOperator"></select></label>
+        <label class="ctl">Jahr <select id="mapYear"></select></label>
+        <label class="ctl">Von <input type="date" id="mapDateFrom"></label>
+        <label class="ctl">Bis <input type="date" id="mapDateTo"></label>
+        <label class="ctl ctl-checks"><input type="checkbox" id="mapDiscovered"> Entdeckte Kanten</label>
+        <span class="muted" id="mapCount"></span>
+      </div>
+      <div id="mapview"> </div>
+    </section>
+
+    <section id="lines" class="tab">
+      <div class="tab-head">
+        <h2>Linien</h2>
+        <p>Alle Linien nach Operator – Laufwege und Baureihen-Anteile.</p>
+      </div>
+      <h3 id="linesFilterHead" class="map-filter-head">Eingestellte Filter</h3>
+      <div class="toolbar">
+        <input type="search" id="linesFilter" placeholder="Suche (Linie, Operator …)">
+        <span class="muted" id="linesCount"></span>
+        <button type="button" class="toolbar-btn" id="linesCopy">Als TSV kopieren</button>
+      </div>
+      <div id="linesBody"></div>
+    </section>
+
+    <section id="trips" class="tab">
+      <div class="tab-head">
+        <h2>Fahrten</h2>
+        <p>Alle Check-ins – durchsuchbar und sortierbar.</p>
+      </div>
+      <div class="toolbar">
+        <input type="search" id="filter" placeholder="Filtern (Linie, Operator, Station, Datum …)">
+        <label class="ctl">Von <input type="date" id="tripDateFrom"></label>
+        <label class="ctl">Bis <input type="date" id="tripDateTo"></label>
+        <span class="ctl ctl-checks">
+          <label><input type="checkbox" id="tripShowDelay"> Verspätung</label>
+          <label><input type="checkbox" id="tripShowRoute"> Laufweg</label>
+        </span>
+        <label class="ctl">Zeiten
+          <select id="tripTimeMode">
+            <option value="planned">Plan</option>
+            <option value="real">Ist</option>
+          </select>
+        </label>
+        <span class="muted" id="tripcount"></span>
+        <button type="button" class="toolbar-btn" id="tripsCopy">Als TSV kopieren</button>
+      </div>
+      <div class="panel">
+        <table id="tripsTable">
+          <thead>
+            <tr>
+              <th data-k="date" class="sorted" title="Sortieren">Datum</th>
+              <th data-k="line" title="Sortieren">Linie</th>
+              <th data-k="operator" title="Sortieren">Operator</th>
+              <th data-k="locClass" title="Sortieren">Baureihe</th>
+              <th data-k="vehicles" title="Sortieren">Wagen</th>
+              <th data-k="from" title="Sortieren">Von</th>
+              <th data-k="to" title="Sortieren">Nach</th>
+              <th data-k="depTime" title="Sortieren">Ab</th>
+              <th data-k="arrTime" title="Sortieren">An</th>
+              <th data-k="viaStops" title="Sortieren">Zwischenhalte</th>
+              <th data-k="route" title="Sortieren">Laufweg</th>
+              <th data-k="distanceKm" title="Sortieren">km</th>
+              <th data-k="durationMin" title="Sortieren">Min</th>
+              <th data-k="delay" title="Sortieren">Versp.</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="vehicles" class="tab">
+      <div class="tab-head">
+        <h2>Fahrzeuge</h2>
+        <p>Getaggte Wagennummern je Baureihe/Kategorie und Linie.</p>
+      </div>
+      <h3 id="vehFilterHead" class="map-filter-head">Eingestellte Filter</h3>
+      <div class="toolbar">
+        <label class="ctl">Tabellen je
+          <select id="vehGroup">
+            <option value="locClass">Baureihe</option>
+            <option value="category">Produktkategorie</option>
+          </select>
+        </label>
+        <label class="ctl">Operator <select id="vehOperator"></select></label>
+        <label class="ctl">Kategorie <select id="vehCategory"></select></label>
+        <label class="ctl">Von <input type="date" id="vehDateFrom"></label>
+        <label class="ctl">Bis <input type="date" id="vehDateTo"></label>
+        <input type="search" id="vehFilter" placeholder="Suche (Wagennr., Linie …)">
+        <span class="ctl ctl-checks">Anzeige
+          <label><input type="checkbox" name="vehShow" value="date" checked> Datum</label>
+          <label><input type="checkbox" name="vehShow" value="count"> Häufigkeit</label>
+          <label><input type="checkbox" name="vehShow" value="km"> km</label>
+          <label><input type="checkbox" name="vehShow" value="segments"> Segmente</label>
+        </span>
+        <span class="muted" id="vehCount"></span>
+        <button type="button" class="toolbar-btn" id="vehCopy">Als TSV kopieren</button>
+      </div>
+      <div id="vehMatrices"></div>
+    </section>
+
+    <section id="daily" class="tab">
+      <div class="tab-head">
+        <h2>Tagesziele</h2>
+        <p>Was an einem Tag zum ersten Mal vorkam – und was an dem Tag wiederholt befahren wurde.</p>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="daily-nav" id="dailyPrev" title="Vorheriger Tag mit Fahrten">‹</button>
+        <label class="ctl">Datum <input type="date" id="dailyDate"></label>
+        <button type="button" class="daily-nav" id="dailyNext" title="Nächster Tag mit Fahrten">›</button>
+        <span class="muted" id="dailySummary"></span>
+        <button type="button" class="toolbar-btn" id="dailyCopy">Als TSV kopieren</button>
+      </div>
+      <div id="dailyBody"></div>
+    </section>
+  </main>
+
+  <div id="vehModal" class="modal-overlay">
+    <div class="modal">
+      <button class="modal-x" id="vehModalClose" aria-label="Schließen">×</button>
+      <div id="vehModalBody"></div>
+    </div>
   </div>
-</aside>
 
-<main>
-<section id="overview" class="tab active">
-  <div class="tab-head"><h2>Übersicht</h2><p>Kennzahlen und meistbefahrene Segmente.</p></div>
-  <div class="cards" id="kpis"></div>
-  <div class="panel" id="segpanel" style="margin-top:24px">
-    <h3>Meistbefahrene Segmente</h3>
-    <p class="hint" style="margin:0 0 10px;color:var(--muted);font-size:13px">Zunächst 30 Einträge.</p>
-    <table id="segtable"><thead><tr><th>Von</th><th>Nach</th><th>Anzahl</th></tr></thead>
-      <tbody></tbody></table>
-  </div>
-</section>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    const DATA = __DATA__;
 
-<section id="stats" class="tab">
-  <div class="tab-head"><h2>Statistiken</h2>
-    <p>Linien, Baureihen, Fahrzeuge und Stationen – Rankings, Unique-Kombis und Kreuztabellen.</p></div>
-  <div id="stats-extra" class="stats-sec"></div>
-  <div id="stats-lines" class="stats-sec"></div>
-  <div id="stats-loc" class="stats-sec"></div>
-  <div id="stats-veh" class="stats-sec"></div>
-  <div id="stats-stations" class="stats-sec"></div>
-  <div id="stats-edges" class="stats-sec"></div>
-  <div id="stats-repeat" class="stats-sec"></div>
-  <div id="stats-cross" class="stats-sec"></div>
-</section>
-
-<section id="map" class="tab">
-  <div class="tab-head"><h2>Karte</h2><p>Gerichtete Befahrungs-Heatmap – filterbar nach Fahrt-Attributen.</p></div>
-  <div class="toolbar">
-    <label class="ctl">Linie <select id="mapLine"></select></label>
-    <label class="ctl">Baureihe <select id="mapLoc"></select></label>
-    <label class="ctl">Fahrzeug <select id="mapVehicle"></select></label>
-    <label class="ctl">Kategorie <select id="mapCat"></select></label>
-    <label class="ctl">Operator <select id="mapOperator"></select></label>
-    <label class="ctl">Jahr <select id="mapYear"></select></label>
-    <label class="ctl">Datum <input type="date" id="mapDate"></label>
-    <span class="muted" id="mapCount"></span>
-  </div>
-  <div id="mapview">  </div>
-</section>
-
-<section id="lines" class="tab">
-  <div class="tab-head"><h2>Linien</h2>
-    <p>Alle Linien nach Operator – Kanten und Baureihen-Anteile.</p></div>
-  <div class="toolbar">
-    <input type="search" id="linesFilter" placeholder="Suche (Linie, Operator …)">
-    <span class="muted" id="linesCount"></span>
-  </div>
-  <div id="linesBody"></div>
-</section>
-
-<section id="trips" class="tab">
-  <div class="tab-head"><h2>Fahrten</h2><p>Alle Check-ins – durchsuchbar und sortierbar.</p></div>
-  <div class="toolbar">
-    <input type="search" id="filter" placeholder="Filtern (Linie, Operator, Station, Datum …)">
-    <label class="ctl">Von <input type="date" id="tripDateFrom"></label>
-    <label class="ctl">Bis <input type="date" id="tripDateTo"></label>
-    <span class="ctl ctl-checks">
-      <label><input type="checkbox" id="tripShowDelay"> Verspätung</label>
-      <label><input type="checkbox" id="tripShowRoute"> Laufweg</label>
-    </span>
-    <label class="ctl">Zeiten
-      <select id="tripTimeMode">
-        <option value="planned">Plan</option>
-        <option value="real">Ist</option>
-      </select>
-    </label>
-    <span class="muted" id="tripcount"></span>
-    <button type="button" class="toolbar-btn" id="tripsCopy">Als TSV kopieren</button>
-  </div>
-  <div class="panel">
-    <table id="tripsTable">
-      <thead><tr>
-        <th data-k="date" class="sorted" title="Sortieren">Datum</th>
-        <th data-k="line" title="Sortieren">Linie</th>
-        <th data-k="operator" title="Sortieren">Operator</th>
-        <th data-k="locClass" title="Sortieren">Baureihe</th>
-        <th data-k="vehicles" title="Sortieren">Wagen</th>
-        <th data-k="from" title="Sortieren">Von</th>
-        <th data-k="to" title="Sortieren">Nach</th>
-        <th data-k="depTime" title="Sortieren">Ab</th>
-        <th data-k="arrTime" title="Sortieren">An</th>
-        <th data-k="viaStops" title="Sortieren">Zwischenhalte</th>
-        <th data-k="route" title="Sortieren">Laufweg</th>
-        <th data-k="distanceKm" title="Sortieren">km</th>
-        <th data-k="durationMin" title="Sortieren">Min</th>
-        <th data-k="delay" title="Sortieren">Versp.</th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</section>
-
-<section id="vehicles" class="tab">
-  <div class="tab-head"><h2>Fahrzeuge</h2><p>Getaggte Wagennummern je Baureihe/Kategorie und Linie.</p></div>
-  <div class="toolbar">
-    <label class="ctl">Tabellen je
-      <select id="vehGroup">
-        <option value="locClass">Baureihe</option>
-        <option value="category">Produktkategorie</option>
-      </select>
-    </label>
-    <label class="ctl">Operator <select id="vehOperator"></select></label>
-    <label class="ctl">Kategorie <select id="vehCategory"></select></label>
-    <label class="ctl">Jahr <select id="vehYear"></select></label>
-    <input type="search" id="vehFilter" placeholder="Suche (Wagennr., Linie …)">
-    <span class="ctl ctl-checks">Anzeige
-      <label><input type="checkbox" name="vehShow" value="date" checked> Datum</label>
-      <label><input type="checkbox" name="vehShow" value="count"> Häufigkeit</label>
-      <label><input type="checkbox" name="vehShow" value="km"> km</label>
-      <label><input type="checkbox" name="vehShow" value="segments"> Segmente</label>
-    </span>
-    <span class="muted" id="vehCount"></span>
-  </div>
-  <div id="vehMatrices"></div>
-</section>
-
-<section id="daily" class="tab">
-  <div class="tab-head"><h2>Tagesziele</h2>
-    <p>Was an einem Tag zum ersten Mal vorkam – und was an dem Tag wiederholt befahren wurde.</p></div>
-  <div class="toolbar">
-    <button type="button" class="daily-nav" id="dailyPrev" title="Vorheriger Tag mit Fahrten">‹</button>
-    <label class="ctl">Datum <input type="date" id="dailyDate"></label>
-    <button type="button" class="daily-nav" id="dailyNext" title="Nächster Tag mit Fahrten">›</button>
-    <span class="muted" id="dailySummary"></span>
-    <button type="button" class="toolbar-btn" id="dailyCopy">Als TSV kopieren</button>
-  </div>
-  <div id="dailyBody"></div>
-</section>
-</main>
-
-<div id="vehModal" class="modal-overlay">
-  <div class="modal">
-    <button class="modal-x" id="vehModalClose" aria-label="Schließen">×</button>
-    <div id="vehModalBody"></div>
-  </div>
-</div>
-
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-<script>
-const DATA = __DATA__;
-
-__JS__
-</script>
+    __JS__
+  </script>
 </body>
+
 </html>

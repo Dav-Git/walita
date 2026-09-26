@@ -5,7 +5,7 @@
 
 Die Fahrtliste zeigt Baureihe und Fahrzeugnummer direkt; Zellen werden lokal
 gestagt. Speichern schreibt den Diff live auf den Server. Laufweg/`trip`
-bleibt unangetastet.
+bleibt unangetastet. Die Linienfarbe ist ein lokales Overlay (kein API-Write).
 
 Auth wie der Export, aber mit Scope `write-statuses` zusätzlich zu
 `read-statuses`.
@@ -22,13 +22,17 @@ import os
 import sys
 import threading
 import tkinter as tk
-from tkinter import font as tkfont
+import webbrowser
+from tkinter import colorchooser, font as tkfont
 from tkinter import messagebox, ttk
 import urllib.parse
 
 import auth
 import build_dashboard
 import download_statuses as dl
+import edge_patches as ep
+import line_color_patches as lcp
+import station_patches as sp
 from version import __version__
 
 EDITOR_SCOPES = "read-statuses write-statuses"
@@ -46,8 +50,10 @@ TRIP_HEADINGS = {
 }
 EDIT_COLS = ("loc", "veh")
 COL_TO_KEY = {"loc": KEY_LOC, "veh": KEY_VEH}
+EDGE_KIND_LABEL = {"override": "Fahrt", "default": "Standard", "": "—"}
 
 TAG_KEY_SUGGESTIONS = (
+    "dubi",
     "trwl:seat",
     "trwl:wagon",
     "trwl:wagon_class",
@@ -514,10 +520,108 @@ class TagDialog(tk.Toplevel):
         self.destroy()
 
 
+class LineColorDialog(tk.Toplevel):
+    """Hex-Eingabe plus nativer Farbwähler; Vorschau als Linien-Badge."""
+
+    _EMPTY = "#cbd5e1"
+
+    def __init__(self, master, line_name, initial_bg=None):
+        super().__init__(master)
+        self.title("Linienfarbe")
+        self.resizable(False, False)
+        self.transient(master)
+        self.result = None
+        self._line_name = line_name or "Linie"
+        start = lcp.normalize_hex(initial_bg)
+        self._hex_var = tk.StringVar(value=("#" + start) if start else "")
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Hintergrund (Hex)").pack(anchor="w")
+        row = ttk.Frame(frm)
+        row.pack(fill="x", pady=(0, 8))
+        self._entry = ttk.Entry(row, textvariable=self._hex_var, width=14)
+        self._entry.pack(side="left")
+        ttk.Button(row, text="Farbwähler…", command=self._pick).pack(
+            side="left", padx=(8, 0)
+        )
+
+        self._preview = tk.Label(
+            frm, text=self._line_name, padx=10, pady=4,
+            relief="flat", font=tkfont.nametofont("TkDefaultFont"),
+        )
+        self._preview.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            frm, text="Textfarbe wird automatisch gesetzt. Nur lokal, kein Upload.",
+        ).pack(anchor="w")
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Abbrechen", command=self._cancel).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
+
+        if hasattr(self._hex_var, "trace_add"):
+            self._hex_var.trace_add("write", lambda *_: self._refresh_preview())
+        else:
+            self._hex_var.trace("w", lambda *_: self._refresh_preview())
+        self._refresh_preview()
+
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+        self._entry.focus_set()
+        self._entry.selection_range(0, "end")
+        self.wait_window(self)
+
+    def _refresh_preview(self):
+        pair = lcp.to_css_pair(self._hex_var.get())
+        if not pair:
+            self._preview.configure(
+                bg=self._EMPTY, fg="#334155", text=self._line_name,
+            )
+            return
+        self._preview.configure(bg=pair[0], fg=pair[1], text=self._line_name)
+
+    def _pick(self):
+        current = lcp.normalize_hex(self._hex_var.get())
+        initial = "#" + current if current else None
+        try:
+            _rgb, hx = colorchooser.askcolor(
+                color=initial, parent=self, title="Linienfarbe",
+            )
+        except tk.TclError:
+            return
+        if hx:
+            self._hex_var.set(hx)
+
+    def _ok(self):
+        bg = lcp.normalize_hex(self._hex_var.get())
+        if not bg:
+            messagebox.showerror(
+                "Linienfarbe",
+                "Bitte eine 6-stellige Hex-Farbe angeben (z.B. #0066ad).",
+                parent=self,
+            )
+            return
+        self.result = bg
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class EditorApp:
     def __init__(self, root, token, username, statuses, statuses_path, limit, since,
                  stations_path="data/stations.json", dashboard_path="data/dashboard.html",
-                 loc_class_families="loc_class_families.txt", ignore_plus=False):
+                 loc_class_families="loc_class_families.txt", ignore_plus=False,
+                 edge_patches_path="data/edge_patches.json",
+                 station_patches_path="data/station_patches.json",
+                 line_color_patches_path="data/line_color_patches.json"):
         self.root = root
         self.token = token
         self.username = username
@@ -527,12 +631,21 @@ class EditorApp:
         self.dashboard_path = dashboard_path
         self.loc_class_families = loc_class_families
         self.ignore_plus = ignore_plus
+        self.edge_patches_path = edge_patches_path
+        self.station_patches_path = station_patches_path
+        self.line_color_patches_path = line_color_patches_path
+        self.patches = ep.load_patches(edge_patches_path)
+        self.station_patches = sp.load_patches(station_patches_path)
+        self.line_color_patches = lcp.load_patches(line_color_patches_path)
+        self._patch_server = None
+        self._station_server = None
         self.limit = limit
         self.since = since
         self.filtered = []
         self.current = None
         self._busy = False
         self._tag_rows = []
+        self._edge_rows = []
         self._ignore_select = False
         self._edit_entry = None
         self._edit_iid = None
@@ -614,7 +727,7 @@ class EditorApp:
         headings = TRIP_HEADINGS
         widths = {
             "date": 90, "line": 90, "origin": 140, "dest": 140,
-            "loc": 80, "veh": 140,
+            "loc": 210, "veh": 140,
         }
         for col in TRIP_COLS:
             self.trips.heading(col, command=lambda c=col: self._sort_by(c))
@@ -642,6 +755,32 @@ class EditorApp:
 
         self.meta_var = tk.StringVar(value="Keine Fahrt gewählt.")
         ttk.Label(right, textvariable=self.meta_var, justify="left").pack(anchor="w")
+
+        color_row = ttk.Frame(right)
+        color_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(color_row, text="Linienfarbe").pack(side="left")
+        self._color_swatch = tk.Frame(
+            color_row, width=32, height=18, relief="solid", bd=1,
+            highlightthickness=0, cursor="hand2",
+        )
+        self._color_swatch.pack(side="left", padx=(8, 6))
+        self._color_swatch.pack_propagate(False)
+        self._color_hex_var = tk.StringVar(value="—")
+        ttk.Label(color_row, textvariable=self._color_hex_var).pack(side="left")
+        self._color_src_var = tk.StringVar(value="")
+        ttk.Label(color_row, textvariable=self._color_src_var).pack(
+            side="left", padx=(6, 0)
+        )
+        self.color_pick_btn = ttk.Button(
+            color_row, text="Ändern", command=self._pick_line_color
+        )
+        self.color_pick_btn.pack(side="right")
+        self.color_reset_btn = ttk.Button(
+            color_row, text="Zurücksetzen", command=self._reset_line_color
+        )
+        self.color_reset_btn.pack(side="right", padx=(0, 6))
+        self._color_swatch.bind("<Button-1>", lambda _e: self._pick_line_color())
+        self._refresh_line_color()
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
 
@@ -682,6 +821,40 @@ class EditorApp:
         )
         ttk.Button(tag_btns, text="Tag löschen", command=self._delete_tag).pack(side="left")
 
+        ttk.Label(right, text="Kanten").pack(anchor="w", pady=(10, 2))
+        edge_fr = ttk.Frame(right)
+        edge_fr.pack(fill="x")
+        self.edges = ttk.Treeview(
+            edge_fr, columns=("origin", "dest", "patch"), show="headings",
+            selectmode="browse", height=5,
+        )
+        self.edges.heading("origin", text="Von")
+        self.edges.heading("dest", text="Nach")
+        self.edges.heading("patch", text="Patch")
+        self.edges.column("origin", width=110)
+        self.edges.column("dest", width=110)
+        self.edges.column("patch", width=80)
+        edge_scroll = ttk.Scrollbar(edge_fr, orient="vertical", command=self.edges.yview)
+        self.edges.configure(yscrollcommand=edge_scroll.set)
+        self.edges.pack(side="left", fill="x", expand=True)
+        edge_scroll.pack(side="right", fill="y")
+        self.edges.bind("<Double-1>", lambda _e: self._open_edge_map())
+
+        edge_btns = ttk.Frame(right)
+        edge_btns.pack(fill="x", pady=6)
+        self.edge_map_btn = ttk.Button(
+            edge_btns, text="Auf Karte anreichern", command=self._open_edge_map
+        )
+        self.edge_map_btn.pack(side="left")
+        self.edge_clr_def_btn = ttk.Button(
+            edge_btns, text="Standard löschen", command=self._clear_edge_default
+        )
+        self.edge_clr_def_btn.pack(side="left", padx=6)
+        self.edge_clr_ov_btn = ttk.Button(
+            edge_btns, text="Fahrt-Override löschen", command=self._clear_edge_override
+        )
+        self.edge_clr_ov_btn.pack(side="left")
+
         act = ttk.Frame(outer)
         act.pack(fill="x", pady=(8, 0))
         self.save_btn = ttk.Button(act, text="Speichern", command=self._save)
@@ -690,6 +863,10 @@ class EditorApp:
             act, text="Dashboard neu bauen", command=self._on_rebuild_dashboard
         )
         self.dash_btn.pack(side="left", padx=8)
+        self.station_map_btn = ttk.Button(
+            act, text="Stationen anpassen", command=self._open_station_map
+        )
+        self.station_map_btn.pack(side="left", padx=8)
         ttk.Label(
             act, text="Speichern sendet gestagte Änderungen nach Träwelling"
         ).pack(side="left")
@@ -712,6 +889,12 @@ class EditorApp:
         self.save_btn.configure(state=state)
         self.reload_btn.configure(state=state)
         self.dash_btn.configure(state=state)
+        if hasattr(self, "edge_map_btn"):
+            self.edge_map_btn.configure(state=state)
+            self.edge_clr_def_btn.configure(state=state)
+            self.edge_clr_ov_btn.configure(state=state)
+        if hasattr(self, "station_map_btn"):
+            self.station_map_btn.configure(state=state)
         if msg:
             self.status_var.set(msg)
 
@@ -857,6 +1040,8 @@ class EditorApp:
         self._update_body_count()
         self._tag_rows = []
         self._refresh_extra_tree()
+        self._refresh_edges()
+        self._refresh_line_color()
 
     def _on_select(self):
         if self._busy or self._ignore_select:
@@ -895,6 +1080,8 @@ class EditorApp:
             if _norm_tag(t)["key"] and _norm_tag(t)["key"] not in TABLE_TAG_SET
         ]
         self._refresh_extra_tree()
+        self._refresh_edges()
+        self._refresh_line_color()
 
     def _on_body_changed(self):
         self._update_body_count()
@@ -970,6 +1157,276 @@ class EditorApp:
         del self._tag_rows[idx]
         self._refresh_extra_tree()
         self._flush_detail()
+
+    def _refresh_line_color(self):
+        if not hasattr(self, "_color_swatch"):
+            return
+        empty = LineColorDialog._EMPTY
+        bg, _fg, patched = lcp.effective_colors(
+            self.current, self.line_color_patches
+        )
+        has = self.current is not None
+        if has and bg:
+            self._color_swatch.configure(bg="#" + bg)
+            self._color_hex_var.set("#" + bg)
+            self._color_src_var.set("lokal" if patched else "Träwelling")
+        else:
+            self._color_swatch.configure(bg=empty)
+            self._color_hex_var.set("—")
+            self._color_src_var.set("" if not has else "keine")
+        self.color_pick_btn.configure(state="normal" if has else "disabled")
+        self.color_reset_btn.configure(
+            state="normal" if has and patched else "disabled"
+        )
+
+    def _pick_line_color(self):
+        if self.current is None:
+            return
+        bg, _fg, _patched = lcp.effective_colors(
+            self.current, self.line_color_patches
+        )
+        bits = _checkin_bits(self.current)
+        dlg = LineColorDialog(self.root, bits["line"], initial_bg=bg)
+        if not dlg.result:
+            return
+        sid = self.current.get("id")
+        if not lcp.set_color(self.line_color_patches, sid, dlg.result):
+            messagebox.showerror(
+                "Linienfarbe", "Ungültige Farbe.", parent=self.root
+            )
+            return
+        if not lcp.save_patches(
+            self.line_color_patches_path, self.line_color_patches
+        ):
+            messagebox.showerror(
+                "Linienfarbe",
+                "line_color_patches.json nicht schreibbar.",
+                parent=self.root,
+            )
+            return
+        self._refresh_line_color()
+        self._set_status("Linienfarbe gespeichert (lokal).")
+
+    def _reset_line_color(self):
+        if self.current is None:
+            return
+        lcp.clear_color(self.line_color_patches, self.current.get("id"))
+        if not lcp.save_patches(
+            self.line_color_patches_path, self.line_color_patches
+        ):
+            messagebox.showerror(
+                "Linienfarbe",
+                "line_color_patches.json nicht schreibbar.",
+                parent=self.root,
+            )
+            return
+        self._refresh_line_color()
+        self._set_status("Linienfarbe zurückgesetzt (lokal).")
+
+    def _refresh_edges(self):
+        if not hasattr(self, "edges"):
+            return
+        self.edges.delete(*self.edges.get_children())
+        self._edge_rows = []
+        if not self.current:
+            return
+        sid = self.current.get("id")
+        for a, b in ep.consecutive_pairs(dl.traveled_stopovers(self.current)):
+            a_id, b_id = a.get("id"), b.get("id")
+            kind = ep.patch_kind(self.patches, sid, a_id, b_id)
+            self._edge_rows.append({
+                "from_id": a_id,
+                "to_id": b_id,
+                "from_name": a.get("name") or ep.station_name(
+                    {}, a_id, _station_name(a)
+                ),
+                "to_name": b.get("name") or ep.station_name(
+                    {}, b_id, _station_name(b)
+                ),
+                "kind": kind,
+            })
+        for i, row in enumerate(self._edge_rows):
+            self.edges.insert(
+                "", "end", iid=str(i),
+                values=(
+                    row["from_name"], row["to_name"],
+                    EDGE_KIND_LABEL.get(row["kind"], row["kind"] or "—"),
+                ),
+            )
+        kids = self.edges.get_children()
+        if kids:
+            self.edges.selection_set(kids[0])
+            self.edges.focus(kids[0])
+
+    def _selected_edge(self):
+        sel = self.edges.selection() if hasattr(self, "edges") else ()
+        if not sel:
+            return None
+        try:
+            idx = int(sel[0])
+        except (TypeError, ValueError):
+            return None
+        if idx < 0 or idx >= len(self._edge_rows):
+            return None
+        return self._edge_rows[idx]
+
+    def _load_stations_file(self):
+        try:
+            with open(self.stations_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            messagebox.showerror(
+                "Stationen",
+                f"{self.stations_path} nicht lesbar: {e}",
+                parent=self.root,
+            )
+            return None
+        return data if isinstance(data, dict) else {}
+
+    def _on_patches_saved(self, patches):
+        def apply():
+            self.patches = patches
+            self._refresh_edges()
+            self._set_status("Kanten-Patch gespeichert (lokal).")
+        try:
+            self.root.after(0, apply)
+        except tk.TclError:
+            pass
+
+    def _on_station_patches_saved(self, patches):
+        def apply():
+            self.station_patches = patches
+            self._set_status("Stations-Patch gespeichert (lokal).")
+        try:
+            self.root.after(0, apply)
+        except tk.TclError:
+            pass
+
+    def _open_station_map(self):
+        stations = self._load_stations_file()
+        if stations is None:
+            messagebox.showerror(
+                "Stationen",
+                f"Keine stations.json unter {self.stations_path}. "
+                "Erst einen Export mit Stationen machen.",
+                parent=self.root,
+            )
+            return
+        self.station_patches = sp.load_patches(self.station_patches_path)
+        self.patches = ep.load_patches(self.edge_patches_path)
+        if self._station_server is None:
+            self._station_server = sp.StationMapService(
+                self.station_patches_path, on_saved=self._on_station_patches_saved
+            )
+            if not self._station_server.start():
+                self._station_server = None
+                messagebox.showerror(
+                    "Stationen",
+                    f"Port {sp.PATCH_MAP_PORT} ist belegt. "
+                    "Anderen Prozess beenden und erneut versuchen.",
+                    parent=self.root,
+                )
+                return
+        self._station_server.set_data(
+            stations=stations,
+            statuses=self.statuses,
+            edge_patches=self.patches,
+            patches=self.station_patches,
+        )
+        webbrowser.open(
+            "%s?t=%s" % (
+                self._station_server.url().rstrip("/"),
+                int(datetime.datetime.now().timestamp() * 1000),
+            )
+        )
+        self._set_status("Stations-Karte im Browser geöffnet.")
+
+    def _open_edge_map(self):
+        if self.current is None:
+            return
+        row = self._selected_edge()
+        if row is None:
+            messagebox.showinfo(
+                "Kanten", "Bitte zuerst eine Kante in der Liste wählen.",
+                parent=self.root,
+            )
+            return
+        stations = self._load_stations_file()
+        if stations is None:
+            messagebox.showerror(
+                "Kanten",
+                f"Keine stations.json unter {self.stations_path}. "
+                "Erst einen Export mit Stationen machen.",
+                parent=self.root,
+            )
+            return
+        self.station_patches = sp.load_patches(self.station_patches_path)
+        stations = sp.apply_to_stations(self.station_patches, stations)
+        self.patches = ep.load_patches(self.edge_patches_path)
+        if self._patch_server is None:
+            self._patch_server = ep.PatchMapService(
+                self.edge_patches_path, on_saved=self._on_patches_saved
+            )
+            if not self._patch_server.start():
+                self._patch_server = None
+                messagebox.showerror(
+                    "Kanten",
+                    f"Port {ep.PATCH_MAP_PORT} ist belegt. "
+                    "Anderen Prozess beenden und erneut versuchen.",
+                    parent=self.root,
+                )
+                return
+        served = ep.served_station_ids(dl.traveled_stopovers(self.current))
+        self._patch_server.set_edge(
+            status_id=self.current.get("id"),
+            from_id=row["from_id"],
+            to_id=row["to_id"],
+            from_name=row["from_name"],
+            to_name=row["to_name"],
+            served_ids=served,
+            stations=stations,
+            patches=self.patches,
+        )
+        webbrowser.open(
+            "%s?from=%s&to=%s&t=%s" % (
+                self._patch_server.url().rstrip("/"),
+                row["from_id"], row["to_id"],
+                int(datetime.datetime.now().timestamp() * 1000),
+            )
+        )
+        self._set_status("Patch-Karte im Browser geöffnet.")
+
+    def _clear_edge_default(self):
+        row = self._selected_edge()
+        if row is None:
+            return
+        ep.clear_default(self.patches, row["from_id"], row["to_id"])
+        if not ep.save_patches(self.edge_patches_path, self.patches):
+            messagebox.showerror(
+                "Kanten", "edge_patches.json nicht schreibbar.", parent=self.root
+            )
+            return
+        self._refresh_edges()
+        self._set_status("Standard-Patch gelöscht.")
+
+    def _clear_edge_override(self):
+        if self.current is None:
+            return
+        row = self._selected_edge()
+        if row is None:
+            return
+        ep.clear_override(
+            self.patches, self.current.get("id"), row["from_id"], row["to_id"]
+        )
+        if not ep.save_patches(self.edge_patches_path, self.patches):
+            messagebox.showerror(
+                "Kanten", "edge_patches.json nicht schreibbar.", parent=self.root
+            )
+            return
+        self._refresh_edges()
+        self._set_status("Fahrt-Override gelöscht.")
 
     def _col_at(self, event):
         region = self.trips.identify("region", event.x, event.y)
@@ -1277,6 +1734,9 @@ class EditorApp:
             "-o", self.dashboard_path,
             "--open",
             "--loc-class-families", self.loc_class_families,
+            "--edge-patches", self.edge_patches_path,
+            "--station-patches", self.station_patches_path,
+            "--line-color-patches", self.line_color_patches_path,
         ]
         if self.ignore_plus:
             argv.append("--ignore-plus")
@@ -1379,6 +1839,18 @@ def parse_args(argv=None):
         help="Wagennummern-Tags beim Dashboard-Bau nicht am '+' trennen.",
     )
     parser.add_argument(
+        "--edge-patches", default="data/edge_patches.json",
+        help="Lokale Kanten-Patches (Default: data/edge_patches.json).",
+    )
+    parser.add_argument(
+        "--station-patches", default="data/station_patches.json",
+        help="Lokale Stations-Patches (Default: data/station_patches.json).",
+    )
+    parser.add_argument(
+        "--line-color-patches", default="data/line_color_patches.json",
+        help="Lokale Linienfarben-Patches (Default: data/line_color_patches.json).",
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="Max. Anzahl Statuses beim Laden von der API.",
     )
@@ -1453,6 +1925,9 @@ def main(argv=None):
         dashboard_path=args.dashboard_output,
         loc_class_families=args.loc_class_families,
         ignore_plus=args.ignore_plus,
+        edge_patches_path=args.edge_patches,
+        station_patches_path=args.station_patches,
+        line_color_patches_path=args.line_color_patches,
     )
     root.mainloop()
     return 0

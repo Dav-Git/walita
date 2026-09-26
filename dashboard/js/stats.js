@@ -46,7 +46,8 @@
     ["Fahrzeuge", fmtNum(ex.vehicles)],
     ["Einstiegs-St.", fmtNum(ex.stationsBoarded)],
     ["Ausstiegs-St.", fmtNum(ex.stationsAlighted)],
-    ["Durchfahrt-St.", fmtNum(ex.stationsThrough)],
+    ["Gehalten-St.", fmtNum(ex.stationsThrough)],
+    ["Physisch-St.", fmtNum(ex.stationsPassed)],
     ["Kanten", fmtNum(ex.edges)],
     ["Kanten >1×", fmtNum(ex.edgesRepeat)],
     ["Fz×Kante >1", fmtNum(ex.vehEdgeRepeat)],
@@ -64,7 +65,7 @@
       <div><strong>Längste Strecke:</strong> ${tripLabel(ex.maxTrip)}</div>
       <div style="margin-top:6px"><strong>Kürzeste Strecke:</strong> ${tripLabel(ex.minTrip)}</div>
       ${ex.topLine?`<div style="margin-top:6px"><strong>Top-Linie (km):</strong> ${lineBadge(ex.topLine.key)} · ${fmtNum(ex.topLine.km)} km</div>`:""}
-      ${ex.topVehicle?`<div style="margin-top:6px"><strong>Top-Fahrzeug (km):</strong> ${esc(ex.topVehicle.key)} · ${fmtNum(ex.topVehicle.km)} km</div>`:""}
+      ${ex.topVehicle?`<div style="margin-top:6px"><strong>Top-Fahrzeug (km):</strong> ${esc(ex.topVehicle.key)}${ex.topVehicle.locClass?` · ${esc(ex.topVehicle.locClass)}`:""} · ${fmtNum(ex.topVehicle.km)} km</div>`:""}
     </div>`;
   document.getElementById("stats-extra").innerHTML=extraHtml;
 
@@ -173,14 +174,14 @@
 
   renderBarTable("stats-veh", "Fahrzeuge",
     S.byVehicle&&S.byVehicle.length
-      ? "Wagennummern nach Kilometern. Zunächst 50 Einträge."
+      ? "Fahrzeuge nach Kilometern, getrennt nach Baureihe und Wagennummer. Zunächst 50 Einträge."
       : "Keine Fahrzeug-Tags (trwl:vehicle_number) in den Daten.",
     S.byVehicle, [{key:"key", label:"Wagen", lbl:true},
       {key:"locClass", label:"BR", lbl:true}, ...baseCols,
       {key:"uniqueLines", label:"Linien"}],
     {initialLimit:50});
 
-  // Stationen: Ein / Aus / Durch mit kombinierbaren Rollenfiltern
+  // Stationen: Ein / Aus / gehalten / physisch mit kombinierbaren Rollenfiltern
   (function renderStations(){
     const el=document.getElementById("stats-stations");
     const rows=S.byStation||[];
@@ -189,26 +190,29 @@
         <p class="hint">Keine Stations-Daten (keine befahrbaren Stopovers).</p>`;
       return;
     }
-    let useBoarded=true, useAlighted=true, useThrough=true, andMode=false;
+    let useBoarded=true, useAlighted=true, useThrough=true, usePassed=true, andMode=false;
     let sortKey="total", sortAsc=false;
     const cols=[
       {key:"key", label:"Station", lbl:true},
       {key:"boarded", label:"Eingestiegen"},
       {key:"alighted", label:"Ausgestiegen"},
-      {key:"through", label:"Durchfahren"},
+      {key:"through", label:"Gehalten"},
+      {key:"passed", label:"Physisch"},
       {key:"total", label:"Summe"},
       {key:"first", label:"zuerst", date:true},
       {key:"last", label:"zuletzt", date:true},
       {key:"uniqueLines", label:"Linien"},
     ];
     function roleSum(r){
-      return (useBoarded?r.boarded:0)+(useAlighted?r.alighted:0)+(useThrough?r.through:0);
+      return (useBoarded?r.boarded:0)+(useAlighted?r.alighted:0)
+        +(useThrough?r.through:0)+(usePassed?r.passed||0:0);
     }
     function matches(r){
       const parts=[];
       if(useBoarded) parts.push(r.boarded>0);
       if(useAlighted) parts.push(r.alighted>0);
       if(useThrough) parts.push(r.through>0);
+      if(usePassed) parts.push((r.passed||0)>0);
       if(!parts.length) return false;
       return andMode?parts.every(Boolean):parts.some(Boolean);
     }
@@ -240,12 +244,14 @@
         return `<td>${fmtNum(cellVal(r,c.key))}</td>`;
       }).join("")+"</tr>").join("");
       el.innerHTML=`<h3>Stationen</h3>
-        <p class="hint">Pro Fahrt: Einstieg am ersten Halt, Ausstieg am letzten, Durchfahrt an Zwischenhalten.
-          Summe und Filter beziehen sich auf die aktivierten Rollen.</p>
+        <p class="hint">Pro Fahrt: Einstieg am ersten Halt, Ausstieg am letzten, gehalten an Träwelling-Zwischenhalten, physische Durchfahrt an Patch-Via-Stationen.
+          Entfällt-Zwischenhalte zählen weder als gehalten noch als Durchfahrt, bis sie als Via im Patch stehen.
+          Tag dubi=start/ende zählt Origin/Destination als gehalten. Summe und Filter beziehen sich auf die aktivierten Rollen.</p>
         <div class="stats-roles">
           <label><input type="checkbox" id="stRoleB" ${useBoarded?"checked":""}> Eingestiegen</label>
           <label><input type="checkbox" id="stRoleA" ${useAlighted?"checked":""}> Ausgestiegen</label>
-          <label><input type="checkbox" id="stRoleT" ${useThrough?"checked":""}> Durchfahren</label>
+          <label><input type="checkbox" id="stRoleT" ${useThrough?"checked":""}> Gehalten</label>
+          <label><input type="checkbox" id="stRoleP" ${usePassed?"checked":""}> Physisch</label>
           <span class="sep"></span>
           <label><input type="checkbox" id="stRoleAnd" ${andMode?"checked":""}> nur Kombination</label>
           <span style="margin-left:auto">${fmtNum(data.length)} Stationen</span>
@@ -255,6 +261,7 @@
       el.querySelector("#stRoleB").onchange=e=>{ useBoarded=e.target.checked; paint(); };
       el.querySelector("#stRoleA").onchange=e=>{ useAlighted=e.target.checked; paint(); };
       el.querySelector("#stRoleT").onchange=e=>{ useThrough=e.target.checked; paint(); };
+      el.querySelector("#stRoleP").onchange=e=>{ usePassed=e.target.checked; paint(); };
       el.querySelector("#stRoleAnd").onchange=e=>{ andMode=e.target.checked; paint(); };
       el.querySelectorAll("th[data-k]").forEach(th=>{
         th.onclick=()=>{
@@ -273,6 +280,7 @@
         if(k==="boarded") useBoarded=true;
         if(k==="alighted") useAlighted=true;
         if(k==="through") useThrough=true;
+        if(k==="passed") usePassed=true;
         paint();
       });
     });
@@ -399,9 +407,10 @@
     const opts=Object.assign({initialLimit:100}, sortOpts||{});
     renderComboTable(holder, title, hint, rows, cols, opts);
   }
-  appendCombo("Fahrzeug × Kante", "Dieselbe Wagennummer auf derselben Kante mehrfach. Zunächst 100 Einträge.",
+  appendCombo("Fahrzeug × Kante", "Dasselbe Fahrzeug (Baureihe und Nummer) auf derselben Kante mehrfach. Zunächst 100 Einträge.",
     S.vehEdgeGt1, [
       {key:"vehicle", label:"Wagen", lbl:true},
+      {key:"locClass", label:"BR", lbl:true},
       {key:"from", label:"Von", lbl:true},
       {key:"to", label:"Nach", lbl:true},
       {key:"count", label:"×"},
@@ -409,9 +418,10 @@
       {key:"last", label:"zuletzt", date:true},
       {key:"lines", label:"Linien"},
     ], {id:"stats-repeat-veh-edge"});
-  appendCombo("Fahrzeug × Kante × Linie", "Dieselbe Kombi Wagen + Segment + Linie mehrfach. Zunächst 100 Einträge.",
+  appendCombo("Fahrzeug × Kante × Linie", "Dieselbe Kombi Fahrzeug (Baureihe und Nummer) + Segment + Linie mehrfach. Zunächst 100 Einträge.",
     S.vehEdgeLineGt1, [
       {key:"vehicle", label:"Wagen", lbl:true},
+      {key:"locClass", label:"BR", lbl:true},
       {key:"from", label:"Von", lbl:true},
       {key:"to", label:"Nach", lbl:true},
       {key:"line", label:"Linie", line:true},
@@ -437,7 +447,7 @@
       {key:"first", label:"zuerst", date:true},
       {key:"last", label:"zuletzt", date:true},
     ], {defaultSort:"count", id:"stats-repeat-loc-edge"});
-  appendCombo("Kanten mit mehreren Fahrzeugen", "Segmente mit mehr als einer Wagennummer. Zunächst 100 Einträge.",
+  appendCombo("Kanten mit mehreren Fahrzeugen", "Segmente mit mehr als einem Fahrzeug (Baureihe und Nummer). Zunächst 100 Einträge.",
     S.multiVehicleEdges, edgeCols, {defaultSort:"uniqueVehicles", id:"stats-repeat-multi-veh"});
 
   function mountHeatmap(parent, cross, title, rowLabelFn, colLabelFn, jumpId, opts){
@@ -495,12 +505,18 @@
     parent.appendChild(wrap);
   }
   const id=x=>x;
+  // Fahrzeug-Zeile = Nummer + \\x1f + Baureihe; angezeigt wird nur die Nummer.
+  const vehLabel=k=>{
+    if(k==null||k==="") return "";
+    const s=String(k), i=s.indexOf(LINE_SEP);
+    return i<0?s:s.slice(0,i);
+  };
   const wdLab=k=>{ const i=+k; return (i>=0&&i<7)?WD[i]:k; };
   const catLab=c=>catLabel(c);
   const crossEl=document.getElementById("stats-cross");
   crossEl.innerHTML=`<h3>Kreuztabellen</h3><p class="hint">Zellen = Anzahl Fahrten; Hover zeigt Kilometer.</p>`;
   mountHeatmap(crossEl, S.crossLocClassLine, "Baureihe × Linie", id, lineName, "stats-cross-loc-line");
-  mountHeatmap(crossEl, S.crossVehicleLine, "Fahrzeug × Linie", id, lineName, "stats-cross-veh-line", {initialLimit:50});
+  mountHeatmap(crossEl, S.crossVehicleLine, "Fahrzeug × Linie", vehLabel, lineName, "stats-cross-veh-line", {initialLimit:50});
   mountHeatmap(crossEl, S.crossLineMonth, "Linie × Monat", lineName, id, "stats-cross-line-month", {initialLimit:50});
   mountHeatmap(crossEl, S.crossLineWeekday, "Linie × Wochentag", lineName, wdLab, "stats-cross-line-weekday", {initialLimit:50});
   mountHeatmap(crossEl, S.crossLocClassMonth, "Baureihe × Monat", id, id, "stats-cross-loc-month");
@@ -509,6 +525,6 @@
   mountHeatmap(crossEl, S.crossLineCategory, "Linie × Kategorie", lineName, catLab, "stats-cross-line-category", {initialLimit:50});
   mountHeatmap(crossEl, S.crossLineDelay, "Linie × Verspätung", lineName, id, "stats-cross-line-delay", {initialLimit:50});
   mountHeatmap(crossEl, S.crossLocClassDelay, "Baureihe × Verspätung", id, id, "stats-cross-loc-delay");
-  mountHeatmap(crossEl, S.crossVehicleMonth, "Fahrzeug × Monat", id, id, "stats-cross-veh-month", {initialLimit:50});
+  mountHeatmap(crossEl, S.crossVehicleMonth, "Fahrzeug × Monat", vehLabel, id, "stats-cross-veh-month", {initialLimit:50});
 })();
 

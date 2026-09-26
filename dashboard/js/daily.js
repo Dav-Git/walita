@@ -44,11 +44,13 @@
       {k:"to", label:"Nach", lbl:true},
     ]},
     {key:"stationsUsed", title:"Benutzte Stationen", cols:[{k:"key", label:"Station", lbl:true}]},
-    {key:"stationsThrough", title:"Durchfahrene Stationen", cols:[{k:"key", label:"Station", lbl:true}]},
+    {key:"stationsThrough", title:"Gehaltene Stationen", cols:[{k:"key", label:"Station", lbl:true}]},
+    {key:"stationsPassed", title:"Physische Durchfahrten", cols:[{k:"key", label:"Station", lbl:true}]},
   ];
   const combos=[
     {key:"lineVehicle", title:"Fahrzeug × Linie", cols:[
       {k:"vehicle", label:"Wagen", lbl:true},
+      {k:"locClass", label:"Baureihe", lbl:true},
       {k:"line", label:"Linie", line:true},
     ]},
     {key:"lineLocClass", title:"Baureihe × Linie", cols:[
@@ -57,6 +59,7 @@
     ]},
     {key:"vehEdge", title:"Fahrzeug × Kante", cols:[
       {k:"vehicle", label:"Wagen", lbl:true},
+      {k:"locClass", label:"Baureihe", lbl:true},
       {k:"from", label:"Von", lbl:true},
       {k:"to", label:"Nach", lbl:true},
     ]},
@@ -76,6 +79,7 @@
     ]},
     {key:"vehEdgeLine", title:"Fahrzeug × Kante × Linie", cols:[
       {k:"vehicle", label:"Wagen", lbl:true},
+      {k:"locClass", label:"Baureihe", lbl:true},
       {k:"from", label:"Von", lbl:true},
       {k:"to", label:"Nach", lbl:true},
       {k:"line", label:"Linie", line:true},
@@ -96,6 +100,12 @@
   function edgeKey(r){
     return (r&&r.from!=null&&r.to!=null)? String(r.from)+"\0"+String(r.to) : "";
   }
+  function vehId(r){
+    if(!r) return "";
+    const n=(r.vehicle!=null&&r.vehicle!=="")?r.vehicle:(r.key||"");
+    if(!n) return "";
+    return (r.locClass||"")+"\0"+n;
+  }
   function keysOf(arr, fn){
     const s=new Set();
     (arr||[]).forEach(r=>{ const k=fn(r); if(k) s.add(k); });
@@ -105,13 +115,14 @@
     return {
       lines: keysOf(buckets.lines, r=>r.key),
       locs: keysOf(buckets.locClasses, r=>r.key),
-      vehs: keysOf(buckets.vehicles, r=>r.key),
+      vehs: keysOf(buckets.vehicles, vehId),
       stationsUsed: keysOf(buckets.stationsUsed, r=>r.key),
       stationsThrough: keysOf(buckets.stationsThrough, r=>r.key),
+      stationsPassed: keysOf(buckets.stationsPassed, r=>r.key),
       edges: keysOf(buckets.edges, edgeKey),
-      vehLine: keysOf(buckets.lineVehicle, r=>r.vehicle+"\0"+r.line),
+      vehLine: keysOf(buckets.lineVehicle, r=>vehId(r)+"\0"+r.line),
       locLine: keysOf(buckets.lineLocClass, r=>r.locClass+"\0"+r.line),
-      vehEdge: keysOf(buckets.vehEdge, r=>r.vehicle+"\0"+r.from+"\0"+r.to),
+      vehEdge: keysOf(buckets.vehEdge, r=>vehId(r)+"\0"+r.from+"\0"+r.to),
       lineEdge: keysOf(buckets.lineEdge, r=>r.line+"\0"+r.from+"\0"+r.to),
       locEdge: keysOf(buckets.locEdge, r=>r.locClass+"\0"+r.from+"\0"+r.to),
     };
@@ -119,15 +130,15 @@
   function isImplied(specKey, row, S){
     if(!S||!row) return false;
     const ek=edgeKey(row);
-    if(specKey==="lineVehicle") return S.vehs.has(row.vehicle)||S.lines.has(row.line);
+    if(specKey==="lineVehicle") return S.vehs.has(vehId(row))||S.lines.has(row.line);
     if(specKey==="lineLocClass") return S.locs.has(row.locClass)||S.lines.has(row.line);
-    if(specKey==="vehEdge") return S.vehs.has(row.vehicle)||S.edges.has(ek);
+    if(specKey==="vehEdge") return S.vehs.has(vehId(row))||S.edges.has(ek);
     if(specKey==="lineEdge") return S.lines.has(row.line)||S.edges.has(ek);
     if(specKey==="locEdge") return S.locs.has(row.locClass)||S.edges.has(ek);
-    if(specKey==="stationLine") return S.stationsUsed.has(row.station)||S.stationsThrough.has(row.station)||S.lines.has(row.line);
-    if(specKey==="vehEdgeLine") return S.vehs.has(row.vehicle)||S.edges.has(ek)||S.lines.has(row.line)
-      ||S.vehLine.has(row.vehicle+"\0"+row.line)
-      ||S.vehEdge.has(row.vehicle+"\0"+row.from+"\0"+row.to)
+    if(specKey==="stationLine") return S.stationsUsed.has(row.station)||S.stationsThrough.has(row.station)||S.stationsPassed.has(row.station)||S.lines.has(row.line);
+    if(specKey==="vehEdgeLine") return S.vehs.has(vehId(row))||S.edges.has(ek)||S.lines.has(row.line)
+      ||S.vehLine.has(vehId(row)+"\0"+row.line)
+      ||S.vehEdge.has(vehId(row)+"\0"+row.from+"\0"+row.to)
       ||S.lineEdge.has(row.line+"\0"+row.from+"\0"+row.to);
     if(specKey==="locEdgeLine") return S.locs.has(row.locClass)||S.edges.has(ek)||S.lines.has(row.line)
       ||S.locLine.has(row.locClass+"\0"+row.line)

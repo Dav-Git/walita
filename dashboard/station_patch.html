@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stationen anpassen – Walita</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+  :root { --bg:#0b1220; --panel:#141d2e; --fg:#e7eef8; --muted:#93a2b8;
+          --accent:#5b95f7; --border:#28344c; --ok:#4ade80; --warn:#fbbf24; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; }
+  body { display:flex; min-height:100%; }
+  aside { width:340px; flex:0 0 340px; background:var(--panel); border-right:1px solid var(--border);
+    display:flex; flex-direction:column; padding:16px; gap:12px; overflow:auto; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  h2 { font-size:12px; margin:0 0 6px; color:var(--muted); font-weight:600; }
+  .muted { color:var(--muted); font-size:12px; }
+  .btns { display:flex; flex-direction:column; gap:8px; }
+  button.act { background:var(--accent); color:#0b1220; border:0; border-radius:8px;
+    padding:10px 12px; font-weight:600; cursor:pointer; }
+  button.act.secondary { background:#1b2740; color:var(--fg); border:1px solid var(--border); }
+  button.act:disabled { opacity:.5; cursor:not-allowed; }
+  #msg { min-height:1.3em; font-size:13px; }
+  #msg.ok { color:var(--ok); }
+  #msg.err { color:#ff6b74; }
+  #map { flex:1; }
+  .legend { font-size:12px; color:var(--muted); }
+  .addrow { display:flex; gap:6px; }
+  .addrow input { flex:1; min-width:0; background:#0b1220; color:var(--fg);
+    border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:inherit; }
+  .addrow input:focus { outline:1px solid var(--accent); }
+  #hits { max-height:140px; overflow:auto; border:1px solid var(--border);
+    border-radius:8px; background:#0b1220; display:none; }
+  #hits button { display:block; width:100%; text-align:left; background:none; border:0;
+    color:var(--fg); padding:6px 10px; cursor:pointer; font:inherit; }
+  #hits button:hover { background:#1b2740; }
+  #hits .meta { color:var(--muted); font-size:11px; }
+  .slot { background:#1b2740; border:1px solid var(--border); border-radius:8px;
+    padding:8px 10px; font-size:13px; min-height:2.6em; }
+  .slot.empty { color:var(--muted); }
+  .rowbtns { display:flex; gap:6px; }
+  .rowbtns button { flex:1; }
+  .list { display:flex; flex-direction:column; gap:4px; max-height:160px; overflow:auto; }
+  .item { display:flex; align-items:flex-start; gap:6px; background:#1b2740;
+    border:1px solid var(--border); border-radius:8px; padding:6px 8px; font-size:12px; }
+  .item span { flex:1; min-width:0; }
+  .item button { background:none; border:0; color:var(--muted); cursor:pointer;
+    padding:0 2px; font-size:14px; }
+  .st-dot { background:none; border:0; }
+  .st-dot span { display:block; width:14px; height:14px; border-radius:50%;
+    border:2px solid #0b1220; box-shadow:0 0 0 1px rgba(0,0,0,.35); }
+</style>
+</head>
+<body>
+<aside>
+  <div>
+    <h1>Stationen anpassen</h1>
+    <div class="muted">Nur lokal – kein Upload nach Träwelling. Internet nur für Kacheln.</div>
+  </div>
+  <div>
+    <div class="muted">Name oder Stations-ID</div>
+    <div class="addrow">
+      <input id="q" type="search" placeholder="Station suchen …" autocomplete="off">
+    </div>
+    <div id="hits"></div>
+  </div>
+  <div>
+    <h2>Ausgewählt</h2>
+    <div class="slot empty" id="picked">Klick auf der Karte</div>
+    <div class="rowbtns">
+      <button type="button" class="act secondary" id="btnSrc">Wird aufgelöst</button>
+      <button type="button" class="act secondary" id="btnDst">Bleibt</button>
+    </div>
+  </div>
+  <div>
+    <h2>Merge</h2>
+    <div class="slot empty" id="srcSlot">Quelle: —</div>
+    <div class="slot empty" id="dstSlot">Ziel: —</div>
+    <button type="button" class="act" id="btnMerge">Zusammenführen</button>
+  </div>
+  <div>
+    <h2>Verschoben</h2>
+    <div class="list" id="moveList"></div>
+  </div>
+  <div>
+    <h2>Zusammengeführt</h2>
+    <div class="list" id="mergeList"></div>
+  </div>
+  <div class="legend">
+    Marker ziehen verschiebt sofort. Blau = Original, Grün = verschoben, Gelb = Auswahl.
+  </div>
+  <div class="btns">
+    <div id="msg"></div>
+  </div>
+</aside>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(function(){
+  const msgEl=document.getElementById("msg");
+  const qEl=document.getElementById("q");
+  const hitsEl=document.getElementById("hits");
+  const pickedEl=document.getElementById("picked");
+  const srcSlot=document.getElementById("srcSlot");
+  const dstSlot=document.getElementById("dstSlot");
+  const moveListEl=document.getElementById("moveList");
+  const mergeListEl=document.getElementById("mergeList");
+  let ctx={stations:[],moves:[],merges:[]};
+  let stationById=new Map();
+  let extraIds=new Set();
+  let markers=new Map();
+  let picked=null, src=null, dst=null;
+  let dragging=false;
+
+  const map=L.map("map",{preferCanvas:true,maxZoom:19}).setView([51,10],6);
+  const PROVIDERS=[
+    {url:"https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+     opts:{maxZoom:19, maxNativeZoom:16, attribution:"&copy; Esri, HERE, Garmin"}},
+    {url:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+     opts:{maxZoom:19, maxNativeZoom:19, subdomains:"abc",
+       referrerPolicy:"unsafe-url", attribution:"&copy; OpenStreetMap"}},
+    {url:"https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+     opts:{maxZoom:19, maxNativeZoom:17, subdomains:"abc", attribution:"&copy; OpenTopoMap (CC-BY-SA)"}},
+  ];
+  let baseLayer=null, tileErrors=0;
+  function useProvider(i){
+    if(baseLayer) map.removeLayer(baseLayer);
+    const p=PROVIDERS[i]; tileErrors=0;
+    baseLayer=L.tileLayer(p.url, Object.assign(
+      {referrerPolicy:"strict-origin-when-cross-origin"}, p.opts));
+    baseLayer.on("tileerror", ()=>{
+      if(++tileErrors>6 && i+1<PROVIDERS.length){ useProvider(i+1); }
+    });
+    baseLayer.addTo(map);
+  }
+  useProvider(0);
+
+  function setMsg(text, kind){
+    msgEl.textContent=text||"";
+    msgEl.className=kind||"";
+  }
+  function sid(v){ return v==null?"":String(v); }
+  function esc(s){
+    return String(s==null?"":s).replace(/[&<>"']/g, c=>({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
+  }
+  function nameOf(id){
+    const st=stationById.get(sid(id));
+    return (st&&st.name)||String(id);
+  }
+  function iconFor(st){
+    const id=sid(st.id);
+    let color="#5b95f7";
+    if(sid(picked&&picked.id)===id) color="#fbbf24";
+    else if(st.moved) color="#4ade80";
+    return L.divIcon({
+      className:"st-dot",
+      html:'<span style="background:'+color+'"></span>',
+      iconSize:[16,16],
+      iconAnchor:[8,8],
+    });
+  }
+  function rememberStation(st){
+    if(!st||st.id==null||st.lat==null) return;
+    stationById.set(sid(st.id), st);
+    extraIds.add(sid(st.id));
+  }
+  function fillSlot(el, label, st){
+    if(!st){
+      el.className="slot empty";
+      el.textContent=label+": —";
+      return;
+    }
+    el.className="slot";
+    el.textContent=label+": "+st.name+" (ID "+st.id+")";
+  }
+  function paintPicked(){
+    if(!picked){
+      pickedEl.className="slot empty";
+      pickedEl.textContent="Klick auf der Karte";
+    }else{
+      pickedEl.className="slot";
+      pickedEl.textContent=picked.name+" (ID "+picked.id+")";
+    }
+    fillSlot(srcSlot, "Quelle", src);
+    fillSlot(dstSlot, "Ziel", dst);
+    document.getElementById("btnMerge").disabled=!(src&&dst&&sid(src.id)!==sid(dst.id));
+  }
+  function paintLists(){
+    moveListEl.innerHTML="";
+    const moves=ctx.moves||[];
+    if(!moves.length){
+      const empty=document.createElement("div");
+      empty.className="muted";
+      empty.textContent="Keine Verschiebungen.";
+      moveListEl.appendChild(empty);
+    }
+    moves.forEach(row=>{
+      const item=document.createElement("div");
+      item.className="item";
+      const label=document.createElement("span");
+      label.textContent=row.name+" (ID "+row.id+")";
+      const rm=document.createElement("button");
+      rm.type="button";
+      rm.textContent="×";
+      rm.title="Zurücksetzen";
+      rm.onclick=()=>clearMove(row.id);
+      item.appendChild(label);
+      item.appendChild(rm);
+      moveListEl.appendChild(item);
+    });
+    mergeListEl.innerHTML="";
+    const merges=ctx.merges||[];
+    if(!merges.length){
+      const empty=document.createElement("div");
+      empty.className="muted";
+      empty.textContent="Keine Merges.";
+      mergeListEl.appendChild(empty);
+    }
+    merges.forEach(row=>{
+      const item=document.createElement("div");
+      item.className="item";
+      const label=document.createElement("span");
+      label.textContent=(row.fromName||row.from)+" → "+(row.toName||row.to);
+      const rm=document.createElement("button");
+      rm.type="button";
+      rm.textContent="×";
+      rm.title="Lösen";
+      rm.onclick=()=>clearMerge(row.from);
+      item.appendChild(label);
+      item.appendChild(rm);
+      mergeListEl.appendChild(item);
+    });
+  }
+  function paintMarkers(){
+    markers.forEach(m=>m.remove());
+    markers.clear();
+    (ctx.stations||[]).forEach(st=>{
+      if(st.lat==null||st.lon==null) return;
+      const m=L.marker([st.lat,st.lon],{
+        icon:iconFor(st),
+        draggable:true,
+        autoPan:true,
+        title:st.name||String(st.id),
+      }).addTo(map);
+      m.bindPopup("<b>"+esc(st.name)+"</b><br>ID "+esc(st.id)+(st.moved?" · verschoben":""));
+      m.on("click", ()=>{
+        if(dragging) return;
+        pickStation(st);
+      });
+      m.on("dragstart", ()=>{ dragging=true; m.closePopup(); });
+      m.on("dragend", async (ev)=>{
+        const ll=ev.target.getLatLng();
+        await saveMove(st.id, ll.lat, ll.lng);
+        dragging=false;
+      });
+      markers.set(sid(st.id), m);
+    });
+  }
+  function pickStation(st){
+    if(!st) return;
+    rememberStation(st);
+    picked=st;
+    paintPicked();
+    paintMarkers();
+    const m=markers.get(sid(st.id));
+    if(m) m.openPopup();
+  }
+  function extraQuery(){
+    const ids=[...extraIds];
+    return ids.length?("?extra="+encodeURIComponent(ids.join(","))):"";
+  }
+  async function reloadContext(opts){
+    opts=opts||{};
+    const res=await fetch("/api/context"+extraQuery());
+    const data=await res.json();
+    ctx=data;
+    stationById.clear();
+    (data.stations||[]).forEach(s=>stationById.set(sid(s.id), s));
+    extraIds.forEach(id=>{
+      if(!stationById.has(id)) extraIds.delete(id);
+    });
+    const keep=id=>stationById.has(sid(id))?stationById.get(sid(id)):null;
+    picked=keep(picked&&picked.id);
+    src=keep(src&&src.id);
+    dst=keep(dst&&dst.id);
+    paintLists();
+    paintPicked();
+    paintMarkers();
+    if(opts.fit){
+      const pts=(data.stations||[]).filter(s=>s.lat!=null).map(s=>[s.lat,s.lon]);
+      if(pts.length){
+        map.fitBounds(pts, {padding:[28,28], maxZoom:12});
+      }else{
+        setMsg("Keine Stationen mit Koordinaten.", "err");
+      }
+    }
+  }
+  async function post(path, body){
+    const res=await fetch(path,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),
+    });
+    return res.json();
+  }
+  async function saveMove(id, lat, lon){
+    setMsg("Speichere …");
+    try{
+      extraIds.add(sid(id));
+      const data=await post("/api/move",{id, latitude:lat, longitude:lon});
+      if(!data.ok){
+        setMsg(data.error||"Verschieben fehlgeschlagen.", "err");
+        await reloadContext();
+        return;
+      }
+      setMsg("Position gespeichert.", "ok");
+      await reloadContext();
+    }catch(e){
+      setMsg("Netzwerkfehler: "+e, "err");
+      await reloadContext();
+    }
+  }
+  async function clearMove(id){
+    setMsg("Setze zurück …");
+    try{
+      const data=await post("/api/clear-move",{id});
+      if(!data.ok){
+        setMsg(data.error||"Zurücksetzen fehlgeschlagen.", "err");
+        return;
+      }
+      setMsg("Verschiebung gelöscht.", "ok");
+      await reloadContext();
+    }catch(e){
+      setMsg("Netzwerkfehler: "+e, "err");
+    }
+  }
+  async function clearMerge(fromId){
+    setMsg("Löse Merge …");
+    try{
+      const data=await post("/api/clear-merge",{from:fromId});
+      if(!data.ok){
+        setMsg(data.error||"Lösen fehlgeschlagen.", "err");
+        return;
+      }
+      setMsg("Merge gelöscht.", "ok");
+      await reloadContext();
+    }catch(e){
+      setMsg("Netzwerkfehler: "+e, "err");
+    }
+  }
+  async function doMerge(){
+    if(!src||!dst) return;
+    const ok=window.confirm(
+      "„"+src.name+"“ wird zu „"+dst.name+"“?\nDie Quell-ID verschwindet in Stats und Karte."
+    );
+    if(!ok) return;
+    setMsg("Führe zusammen …");
+    try{
+      const data=await post("/api/merge",{from:src.id, to:dst.id});
+      if(!data.ok){
+        setMsg(data.error||"Merge fehlgeschlagen.", "err");
+        return;
+      }
+      src=null;
+      picked=dst;
+      setMsg("Zusammengeführt.", "ok");
+      await reloadContext();
+    }catch(e){
+      setMsg("Netzwerkfehler: "+e, "err");
+    }
+  }
+  document.getElementById("btnSrc").onclick=()=>{
+    if(!picked){ setMsg("Zuerst eine Station wählen.", "err"); return; }
+    src=picked;
+    paintPicked();
+  };
+  document.getElementById("btnDst").onclick=()=>{
+    if(!picked){ setMsg("Zuerst eine Station wählen.", "err"); return; }
+    dst=picked;
+    paintPicked();
+  };
+  document.getElementById("btnMerge").onclick=doMerge;
+
+  let searchTimer=null, lastHits=[];
+  function hideHits(){ hitsEl.style.display="none"; hitsEl.innerHTML=""; }
+  function showHits(rows){
+    lastHits=rows||[];
+    if(!lastHits.length){
+      hitsEl.innerHTML='<div class="muted" style="padding:8px 10px">Keine Treffer in stations.json.</div>';
+      hitsEl.style.display="block";
+      return;
+    }
+    hitsEl.innerHTML="";
+    lastHits.forEach(st=>{
+      const btn=document.createElement("button");
+      btn.type="button";
+      btn.innerHTML=esc(st.name)+'<div class="meta">ID '+esc(st.id)+'</div>';
+      btn.onclick=()=>{
+        rememberStation(st);
+        if(!(ctx.stations||[]).some(s=>sid(s.id)===sid(st.id))){
+          ctx.stations=ctx.stations||[];
+          ctx.stations.push(st);
+        }
+        pickStation(st);
+        if(st.lat!=null) map.panTo([st.lat, st.lon]);
+        qEl.value="";
+        hideHits();
+      };
+      hitsEl.appendChild(btn);
+    });
+    hitsEl.style.display="block";
+  }
+  async function runSearch(q){
+    q=(q||"").trim();
+    if(!q){ hideHits(); return; }
+    if(q.length<2 && !/^\d+$/.test(q)){ hideHits(); return; }
+    try{
+      const res=await fetch("/api/search?q="+encodeURIComponent(q));
+      const data=await res.json();
+      showHits(data.stations||[]);
+    }catch(e){
+      setMsg("Suche fehlgeschlagen: "+e, "err");
+    }
+  }
+  qEl.addEventListener("input", ()=>{
+    clearTimeout(searchTimer);
+    searchTimer=setTimeout(()=>runSearch(qEl.value), 200);
+  });
+  qEl.addEventListener("keydown", e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      if(lastHits.length){
+        lastHits[0]&&document.querySelector("#hits button")&&document.querySelector("#hits button").click();
+      }else{
+        runSearch(qEl.value);
+      }
+    }
+    if(e.key==="Escape") hideHits();
+  });
+
+  reloadContext({fit:true}).catch(e=>setMsg("Kontext nicht ladbar: "+e, "err"));
+})();
+</script>
+</body>
+</html>

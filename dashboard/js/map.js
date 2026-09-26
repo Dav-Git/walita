@@ -43,9 +43,12 @@ let map=null, mapBounds=[], mapFitted=false;
   const FAM=DATA.locClassFamilies||{}; // Familie -> [locClass, ...]
   const VEH=DATA.mapVehicles||[];    // [locClass, number]
   const rawEdges=DATA.edges||[];     // [a_id, b_id, variantIdx, count]
-  const rawNodes=DATA.nodes||[];     // [sid, variantIdx, count, usedCount]
+  const rawNodes=DATA.nodes||[];     // [sid, variantIdx, count, usedCount, heldCount, passCount]
   const rawVehEdges=DATA.vehEdges||[]; // [a_id, b_id, variantIdx, vehIdx, count]
-  const rawVehNodes=DATA.vehNodes||[]; // [sid, variantIdx, vehIdx, count, usedCount]
+  const rawVehNodes=DATA.vehNodes||[]; // [sid, variantIdx, vehIdx, count, usedCount, heldCount, passCount]
+  const rawDisc=DATA.discoveredEdges||[]; // [a_id, b_id, variantIdx, count]
+  const rawDiscVeh=DATA.discoveredVehEdges||[]; // [a_id, b_id, variantIdx, vehIdx, count]
+  const DISC="#64748b";
   if(!rawEdges.length){ return; }
   const lineEl=document.getElementById("mapLine");
   const locEl=document.getElementById("mapLoc");
@@ -53,10 +56,13 @@ let map=null, mapBounds=[], mapFitted=false;
   const catEl=document.getElementById("mapCat");
   const opEl=document.getElementById("mapOperator");
   const yearEl=document.getElementById("mapYear");
-  const dateEl=document.getElementById("mapDate");
+  const dateFromEl=document.getElementById("mapDateFrom");
+  const dateToEl=document.getElementById("mapDateTo");
+  const discEl=document.getElementById("mapDiscovered");
   const countEl=document.getElementById("mapCount");
   const kpis=DATA.kpis||{};
-  bindDateInput(dateEl, kpis.first, kpis.last);
+  bindDateInput(dateFromEl, kpis.first, kpis.last);
+  bindDateInput(dateToEl, kpis.first, kpis.last);
 
   // Farbskala nach Häufigkeit, Turbo-Spektrum Blau -> Rot.
   function color(t){ // t in [0,1]
@@ -116,7 +122,33 @@ let map=null, mapBounds=[], mapFitted=false;
     if(hasEmpty) html+='<option value="__none__">(ohne Baureihe)</option>';
     locEl.innerHTML=html;
   }
-  fillSelect(lineEl, VAR.map(v=>v[0]), "(ohne Linie)", lineName);
+  function fillLineSelect(){
+    const set=new Set(VAR.map(v=>v[0]));
+    const hasEmpty=set.has("");
+    const byOp=new Map();
+    [...set].filter(v=>v!=="").forEach(k=>{
+      const op=lineOperator(k)||"";
+      if(!byOp.has(op)) byOp.set(op,[]);
+      byOp.get(op).push(k);
+    });
+    const ops=[...byOp.keys()].sort((a,b)=>{
+      if(!a) return 1;
+      if(!b) return -1;
+      return a.localeCompare(b,"de");
+    });
+    let html='<option value="__all__">Alle</option>';
+    ops.forEach(op=>{
+      const lines=byOp.get(op).sort((a,b)=>
+        lineName(a).localeCompare(lineName(b),undefined,{numeric:true}));
+      const label=op||"(ohne Operator)";
+      html+=`<optgroup label="${esc(label)}">`+
+        lines.map(k=>`<option value="${esc(k)}">${esc(lineName(k)||"(ohne Linie)")}</option>`).join("")+
+        '</optgroup>';
+    });
+    if(hasEmpty) html+='<option value="__none__">(ohne Linie)</option>';
+    lineEl.innerHTML=html;
+  }
+  fillLineSelect();
   fillLocSelect();
   fillVehicleSelect();
   fillSelect(catEl, VAR.map(v=>v[2]), "(ohne Kategorie)", catLabel);
@@ -140,16 +172,15 @@ let map=null, mapBounds=[], mapFitted=false;
     return actual===val;
   }
   // Aktuelle Filter-Auswahl auf eine Variante (Attribut-Kombi) anwenden.
-  // Index 4 ist das Reisedatum (YYYY-MM-DD); Jahr-Dropdown filtert per Präfix,
-  // solange kein konkretes Datum gesetzt ist (Datum ist spezieller).
+  // Index 4 ist das Reisedatum (YYYY-MM-DD). Von/Bis ist inklusive; solange
+  // keines von beiden gesetzt ist, filtert das Jahr-Dropdown per Präfix.
   function matchesVar(vi){
     const v=VAR[vi]; if(!v) return false;
     const date=v[4]||"";
-    const dateWant=dateEl.value;
-    const yearOk=dateWant
-      ? true
-      : sel(yearEl.value, date.slice(0,4));
-    const dateOk=!dateWant || date===dateWant;
+    const from=dateFromEl.value, to=dateToEl.value;
+    const ranged=!!(from||to);
+    const yearOk=ranged ? true : sel(yearEl.value, date.slice(0,4));
+    const dateOk=(!from || date>=from) && (!to || date<=to);
     return sel(lineEl.value, v[0]) && selLoc(locEl.value, v[1])
         && sel(catEl.value, v[2]) && sel(opEl.value, v[3]) && yearOk && dateOk;
   }
@@ -163,7 +194,7 @@ let map=null, mapBounds=[], mapFitted=false;
 
   // Sichtbare Kanten/Knoten aus den passenden Buckets aggregieren. Skala je
   // Ansicht neu aus den sichtbaren Zählwerten (min..max) bestimmen.
-  let vEdges=[], vNodes=[], vMin=1, vMax=1;
+  let vEdges=[], vNodes=[], vDiscEdges=[], vMin=1, vMax=1;
   function scale(c){ if(vMax===vMin) return 0.5;
     const t=(Math.log(Math.max(c,1))-Math.log(vMin))/(Math.log(vMax)-Math.log(vMin));
     return Math.max(0, Math.min(1, t)); }
@@ -196,21 +227,22 @@ let map=null, mapBounds=[], mapFitted=false;
     if(useVeh){
       rawVehNodes.forEach(row=>{
         const sid=row[0], vi=row[1], vhi=row[2], cnt=row[3], used=row[4]||0;
+        const held=row[5]||0, passed=row[6]||0;
         if(!matchesVar(vi) || !matchesVeh(vhi)) return;
         const s=ST[sid]; if(!s) return;
         const cur=nm.get(sid);
-        if(cur){ cur.count+=cnt; cur.usedCount+=used; }
-        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt,usedCount:used});
+        if(cur){ cur.count+=cnt; cur.usedCount+=used; cur.heldCount+=held; cur.passCount+=passed; }
+        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt,usedCount:used,heldCount:held,passCount:passed});
       });
     } else {
       rawNodes.forEach(row=>{
         const sid=row[0];
         if(!matchesVar(row[1])) return;
         const s=ST[sid]; if(!s) return;
-        const cnt=row[2], used=row[3]||0;
+        const cnt=row[2], used=row[3]||0, held=row[4]||0, passed=row[5]||0;
         const cur=nm.get(sid);
-        if(cur){ cur.count+=cnt; cur.usedCount+=used; }
-        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt,usedCount:used});
+        if(cur){ cur.count+=cnt; cur.usedCount+=used; cur.heldCount+=held; cur.passCount+=passed; }
+        else nm.set(sid,{lat:s[0],lon:s[1],name:s[2],count:cnt,usedCount:used,heldCount:held,passCount:passed});
       });
     }
     vNodes=[...nm.values()];
@@ -220,6 +252,38 @@ let map=null, mapBounds=[], mapFitted=false;
     // Dünne/seltene zuerst, damit dicke/häufige oben liegen.
     vEdges.sort((p,q)=>p.count-q.count);
     vNodes.sort((p,q)=>p.count-q.count || ((p.usedCount||0)-(q.usedCount||0)));
+    // Entdeckt nur, wenn die Variante zum Filter passt und die Kante unter
+    // genau diesem Filter nicht schon als befahren in em liegt (Linie A
+    // befahren / Linie B nur Laufweg → bei B grau, bei „Alle“ Heatmap).
+    vDiscEdges=[];
+    if(discEl && discEl.checked){
+      const riddenKeys=new Set(em.keys());
+      const dm=new Map();
+      if(useVeh){
+        rawDiscVeh.forEach(row=>{
+          const a=row[0], b=row[1], vi=row[2], vhi=row[3];
+          if(!matchesVar(vi) || !matchesVeh(vhi)) return;
+          const key=a+"|"+b;
+          if(riddenKeys.has(key)) return;
+          const sa=ST[a], sb=ST[b];
+          if(!sa||!sb) return;
+          if(!dm.has(key))
+            dm.set(key,{a:[sa[0],sa[1]],b:[sb[0],sb[1]],from:sa[2],to:sb[2]});
+        });
+      } else {
+        rawDisc.forEach(row=>{
+          const a=row[0], b=row[1];
+          if(!matchesVar(row[2])) return;
+          const key=a+"|"+b;
+          if(riddenKeys.has(key)) return;
+          const sa=ST[a], sb=ST[b];
+          if(!sa||!sb) return;
+          if(!dm.has(key))
+            dm.set(key,{a:[sa[0],sa[1]],b:[sb[0],sb[1]],from:sa[2],to:sb[2]});
+        });
+      }
+      vDiscEdges=[...dm.values()];
+    }
   }
   // Gerichtete Kanten "im Rechtsverkehr": jede Richtung entlang der (nach rechts
   // zeigenden) Segment-Normalen versetzt, plus Richtungspfeil in der Mitte. In
@@ -236,52 +300,81 @@ let map=null, mapBounds=[], mapFitted=false;
   const overlay=L.layerGroup().addTo(map);
   function px(latlng){ return map.latLngToLayerPoint(latlng); }
   function ll(pt){ return map.layerPointToLatLng(pt); }
+  function edgeGeom(e, weight){
+    const pa=px(e.a), pb=px(e.b);
+    const dx=pb.x-pa.x, dy=pb.y-pa.y;
+    const len=Math.hypot(dx,dy)||1;
+    const ux=dx/len, uy=dy/len;
+    const nx=-uy, ny=ux;
+    const offMag=weight/2 + GAP;
+    const off=L.point(nx*offMag, ny*offMag);
+    return {oa:pa.add(off), ob:pb.add(off), ux, uy, nx, ny};
+  }
   function draw(){
     overlay.clearLayers();
+    vDiscEdges.forEach(e=>{
+      const weight=2, g=edgeGeom(e, weight);
+      L.polyline([ll(g.oa),ll(g.ob)],{
+        color:DISC, weight:weight, opacity:.75, dashArray:"6 6"
+      }).bindPopup(`<b>${esc(e.from)} → ${esc(e.to)}</b><br>entdeckt (nicht eingecheckt)`)
+        .addTo(overlay);
+      const m=L.point((g.oa.x+g.ob.x)/2,(g.oa.y+g.ob.y)/2);
+      const tip=L.point(m.x+g.ux*ARROW, m.y+g.uy*ARROW);
+      const wingL=L.point(tip.x-g.ux*ARROW+g.nx*ARROW*0.6, tip.y-g.uy*ARROW+g.ny*ARROW*0.6);
+      const wingR=L.point(tip.x-g.ux*ARROW-g.nx*ARROW*0.6, tip.y-g.uy*ARROW-g.ny*ARROW*0.6);
+      L.polyline([ll(wingL),ll(tip),ll(wingR)],
+        {color:DISC,weight:2,opacity:.8,interactive:false}).addTo(overlay);
+    });
     vEdges.forEach(e=>{
       const t=scale(e.count), col=color(t), weight=3+t*7;
-      const pa=px(e.a), pb=px(e.b);
-      const dx=pb.x-pa.x, dy=pb.y-pa.y;
-      const len=Math.hypot(dx,dy)||1;
-      const ux=dx/len, uy=dy/len;      // Fahrtrichtung
-      const nx=-uy, ny=ux;             // Rechts-Normale (Screen-y nach unten)
-      // Versatz relativ zur Linien­dicke: halbe Dicke + kleiner Spalt, damit sich
-      // auch dicke (häufige) Gegenrichtungen nicht überlagern.
-      const offMag=weight/2 + GAP;
-      const off=L.point(nx*offMag, ny*offMag);
-      const oa=pa.add(off), ob=pb.add(off);
-      L.polyline([ll(oa),ll(ob)],{color:col,weight:weight,opacity:.85})
+      const g=edgeGeom(e, weight);
+      L.polyline([ll(g.oa),ll(g.ob)],{color:col,weight:weight,opacity:.85})
         .bindPopup(`<b>${esc(e.from)} → ${esc(e.to)}</b><br>${e.count}× befahren`)
         .addTo(overlay);
       // Pfeil-Chevron am Mittelpunkt; interactive:false, damit Klicks zur Linie
       // darunter durchgehen und die Kante klickbar bleibt.
-      const m=L.point((oa.x+ob.x)/2,(oa.y+ob.y)/2);
-      const tip=L.point(m.x+ux*ARROW, m.y+uy*ARROW);
-      const wingL=L.point(tip.x-ux*ARROW+nx*ARROW*0.6, tip.y-uy*ARROW+ny*ARROW*0.6);
-      const wingR=L.point(tip.x-ux*ARROW-nx*ARROW*0.6, tip.y-uy*ARROW-ny*ARROW*0.6);
+      const m=L.point((g.oa.x+g.ob.x)/2,(g.oa.y+g.ob.y)/2);
+      const tip=L.point(m.x+g.ux*ARROW, m.y+g.uy*ARROW);
+      const wingL=L.point(tip.x-g.ux*ARROW+g.nx*ARROW*0.6, tip.y-g.uy*ARROW+g.ny*ARROW*0.6);
+      const wingR=L.point(tip.x-g.ux*ARROW-g.nx*ARROW*0.6, tip.y-g.uy*ARROW-g.ny*ARROW*0.6);
       L.polyline([ll(wingL),ll(tip),ll(wingR)],
         {color:col,weight:2+t*3,opacity:.9,interactive:false}).addTo(overlay);
     });
     // Knoten ZULETZT -> liegen optisch oben, fangen Klicks aber nur punktgenau ab.
     vNodes.forEach(n=>{
       const used=(n.usedCount||0)>0;
-      const col=used?color(scale(n.usedCount)):"#5b6b7d";
+      const held=(n.heldCount||0)>0;
+      const passed=(n.passCount||0)>0;
+      const heldOnly=held && !used;
+      const col=used?color(scale(n.usedCount)):"#3d5a80";
+      const parts=[`${n.count}× befahren`];
+      if(used) parts.push(`${n.usedCount}× Ein-/Ausstieg`);
+      if(held) parts.push(`${n.heldCount}× gehalten`);
+      if(passed) parts.push(`${n.passCount}× physische Durchfahrt`);
       L.circleMarker([n.lat,n.lon],{
-        radius:used?5:3, color:used?"#1e293b":"#33475b", weight:used?2:1,
-        fillColor:col, fillOpacity:used?.95:.8})
-        .bindPopup(`<b>${esc(n.name)}</b><br>${n.count}× befahren<br>`+
-          (used?`${n.usedCount}× Ein-/Ausstieg`:"nur Durchfahrt")).addTo(overlay);
+        radius:used?5:(heldOnly?4:3),
+        color:heldOnly?"#000":(used?"#1e293b":"#33475b"),
+        weight:heldOnly?1.5:(used?2:1),
+        fillColor:heldOnly?"#fff":col,
+        fillOpacity:heldOnly?1:(used?.95:.75)})
+        .bindPopup(`<b>${esc(n.name)}</b><br>`+parts.join("<br>")).addTo(overlay);
     });
   }
 
   let legendDiv=null;
   function updateLegend(){
     if(!legendDiv) return;
-    legendDiv.innerHTML=`<b>Befahrungen</b><br>
+    let html=`<b>Befahrungen</b><br>
       <i style="background:${color(0)}"></i> selten (${vMin}×)<br>
       <i style="background:${color(.5)}"></i> mittel<br>
       <i style="background:${color(1)}"></i> häufig (${vMax}×)<br>
-      <span class="muted">Pfeil = Fahrtrichtung<br>großer Punkt = Ein-/Ausstieg</span>`;
+      <span class="muted">Pfeil = Fahrtrichtung<br>großer Punkt = Ein-/Ausstieg</span><br>
+      <i style="background:#fff;width:10px;height:10px;border-radius:50%;border:1.5px solid #000;box-sizing:border-box"></i> gehalten<br>
+      <i style="background:#3d5a80;width:8px;height:8px;border-radius:50%;opacity:.75"></i> nur physische Durchfahrt`;
+    if(discEl && discEl.checked){
+      html+=`<br><i style="background:${DISC}"></i> Entdeckte Kanten`;
+    }
+    legendDiv.innerHTML=html;
   }
   const lg=L.control({position:"bottomright"});
   lg.onAdd=function(){ legendDiv=L.DomUtil.create("div","legend"); updateLegend(); return legendDiv; };
@@ -296,13 +389,16 @@ let map=null, mapBounds=[], mapFitted=false;
     vEdges.forEach(e=>{ mapBounds.push(e.a,e.b); });
     draw();
     updateLegend();
-    countEl.textContent = vEdges.length + " Segmente";
+    countEl.textContent = (discEl && discEl.checked)
+      ? vEdges.length+" Segmente · "+vDiscEdges.length+" entdeckt"
+      : vEdges.length+" Segmente";
   }
   drawAll();
   map.on("zoomend", draw);
-  [lineEl,locEl,vehEl,catEl,opEl,yearEl,dateEl].forEach(el=>{
+  [lineEl,locEl,vehEl,catEl,opEl,yearEl,dateFromEl,dateToEl,discEl].forEach(el=>{
+    if(!el) return;
     el.onchange=drawAll;
-    if(el===dateEl) el.oninput=drawAll;
+    if(el===dateFromEl||el===dateToEl) el.oninput=drawAll;
   });
 })();
 

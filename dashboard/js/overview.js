@@ -3,6 +3,10 @@
   const k=DATA.kpis;
   document.getElementById("subtitle").textContent =
     (k.first&&k.last)? (k.first+" – "+k.last) : "";
+  const builtEl=document.getElementById("builtAt");
+  if(builtEl && DATA.builtAt){
+    builtEl.textContent="Gebaut "+fmtDateTime(DATA.builtAt);
+  }
   const cards=[
     ["Check-ins", k.count.toLocaleString("de-DE")],
     ["Distanz", k.distanceKm.toLocaleString("de-DE")+" km"],

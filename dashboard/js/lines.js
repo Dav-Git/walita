@@ -5,7 +5,6 @@
   const filterEl=document.getElementById("linesFilter");
   const countEl=document.getElementById("linesCount");
   const bodyEl=document.getElementById("linesBody");
-  const EDGE_LIMIT=12;
   // RYB: Primär → Sekundär → Tertiär → dunklere, dann hellere Stufen.
   const BR_PALETTE=[
     "#dc2626","#ffd200","#2563eb",
@@ -14,7 +13,6 @@
     "#9f1239","#a16207","#1e40af","#9a3412","#166534","#5b21b6",
     "#fb7185","#facc15","#60a5fa","#fb923c","#4ade80","#a78bfa",
   ];
-  const expanded=new Set();
   const openLines=new Set();
 
   function fmtN(v){
@@ -44,7 +42,7 @@
     });
   }
 
-  function render(){
+  function visibleGroups(){
     const q=(filterEl&&filterEl.value||"").trim().toLowerCase();
     const rows=LINES.filter(r=>{
       if(!q) return true;
@@ -69,6 +67,52 @@
     for(const g of groups){
       g.lines.sort((a,b)=>lineName(a.key).localeCompare(lineName(b.key),undefined,{numeric:true}));
     }
+    return {rows, groups};
+  }
+  function baureihen(r){
+    const parts=shares(r.locClasses||[], r.count||0);
+    if(!parts.length) return "keine Baureihen getaggt";
+    return parts.map(p=>{
+      const pct=String(p.pct).replace(".",",");
+      return locLabel(p.key)+" "+pct+" %";
+    }).join("; ");
+  }
+  function fahrweg(route){
+    const names=(route.stops||[]).map(s=>s[1]||"—");
+    const path=names.join(" → ");
+    return route.loop&&path?path+" ↻":path;
+  }
+  function activeFilterHeading(){
+    const parts=[];
+    const q=(filterEl&&filterEl.value||"").trim();
+    if(q) parts.push("Suche "+q);
+    const label=parts.length ? parts.join(" · ") : "Alle";
+    return "Linien · Eingestellte Filter: "+label;
+  }
+  function linesTsv(groups){
+    const headers=["Operator","Linie","Baureihen","Fahrweg"];
+    const out=[tsvCell(activeFilterHeading()), headers.join("\t")];
+    groups.forEach(g=>{
+      const op=g.operator||"(ohne Operator)";
+      g.lines.forEach(r=>{
+        const base=[op, lineName(r.key)||"(ohne Linie)", baureihen(r)];
+        const routes=r.routes||[];
+        if(!routes.length){
+          out.push(base.concat([""]).map(tsvCell).join("\t"));
+          return;
+        }
+        routes.forEach(route=>{
+          out.push(base.concat([fahrweg(route)]).map(tsvCell).join("\t"));
+        });
+      });
+    });
+    return out.join("\n");
+  }
+
+  function render(){
+    const headEl=document.getElementById("linesFilterHead");
+    if(headEl) headEl.textContent=activeFilterHeading();
+    const {rows, groups}=visibleGroups();
     if(countEl){
       const nL=rows.length, nO=groups.length;
       countEl.textContent=nL
@@ -93,13 +137,6 @@
         if(el.open) openLines.add(row.key); else openLines.delete(row.key);
       });
     });
-    bodyEl.querySelectorAll(".stats-more[data-idx]").forEach(btn=>{
-      btn.onclick=()=>{
-        const row=LINES[+btn.dataset.idx];
-        if(row){ expanded.add(row.key); openLines.add(row.key); }
-        render();
-      };
-    });
   }
 
   function lineCard(r){
@@ -115,33 +152,56 @@
       const col=locColor(i);
       return `<span title="${fmtN(p.n)} Fahrten"><i style="background:${col}"></i>${esc(locLabel(p.key))} ${String(p.pct).replace(".",",")} %</span>`;
     }).join("");
-    const allEdges=r.edges||[];
+    const nR=(r.routes||[]).length;
     const idx=LINES.indexOf(r);
-    const showAll=expanded.has(r.key);
-    const edges=(!showAll && allEdges.length>EDGE_LIMIT)?allEdges.slice(0,EDGE_LIMIT):allEdges;
-    const remaining=allEdges.length-edges.length;
-    const edgeRows=edges.map(e=>
-      `<tr><td class="lbl">${esc(e[0]||"—")}</td><td class="lbl">${esc(e[1]||"—")}</td><td class="n">×${fmtN(e[2])}</td></tr>`
-    ).join("");
-    const more=remaining>0
-      ? `<button type="button" class="stats-more" data-idx="${idx}">Mehr laden (${fmtN(remaining)} weitere, ${fmtN(allEdges.length)} gesamt)</button>`
-      : "";
-    const edgeBlock=allEdges.length
-      ? `<table class="line-edges"><thead><tr><th>Von</th><th>Nach</th><th></th></tr></thead><tbody>${edgeRows}</tbody></table>${more}`
-      : `<p class="hint" style="margin:8px 0 0">Keine Kanten.</p>`;
     const isOpen=openLines.has(r.key);
     return `<details class="line-card"${isOpen?" open":""} data-idx="${idx}">
       <summary class="line-card-head">${badge(r.key)}
-        <span class="line-card-meta">${fmtN(r.distanceKm)} km · ${fmtN(r.count)} ${r.count===1?"Fahrt":"Fahrten"} · ${fmtN(allEdges.length)} ${allEdges.length===1?"Kante":"Kanten"}</span>
+        <span class="line-card-meta">${fmtN(r.distanceKm)} km · ${fmtN(r.count)} ${r.count===1?"Fahrt":"Fahrten"} · ${fmtN(nR)} ${nR===1?"Laufweg":"Laufwege"}</span>
       </summary>
       <div class="line-card-body">
         <div class="line-stack">${stack||""}</div>
         <div class="line-stack-legend">${legend||'<span>keine Baureihen getaggt</span>'}</div>
-        ${edgeBlock}
+        ${pearl(r)}
       </div>
     </details>`;
   }
 
+  function pearl(r){
+    const routes=r.routes||[];
+    if(!routes.length) return `<p class="hint">Kein Laufweg.</p>`;
+    const c=LC[r.key];
+    const st=c?` style="--pearl:${c[0]}"`:"";
+    const items=routes.map(route=>{
+      const stops=route.stops||[];
+      const counts=route.counts||[];
+      const loop=!!route.loop;
+      const rows=[];
+      stops.forEach((s,i)=>{
+        const flags=s[2]||0;
+        const cls=["pearl-row","pearl-stop"];
+        if(flags&1) cls.push("used");
+        if(flags&2) cls.push("used-line");
+        if(flags&4) cls.push("pass");
+        const mark=flags&4?"":"<i></i>";
+        rows.push(`<div class="${cls.join(" ")}"><span class="pearl-n"></span><span class="pearl-mark">${mark}</span><span class="pearl-lab">${esc(s[1]||"—")}</span></div>`);
+        const last=i===stops.length-1;
+        if(!last){
+          rows.push(`<div class="pearl-row pearl-edge"><span class="pearl-n">${fmtN(counts[i])}</span><span class="pearl-mark"></span><span class="pearl-lab"></span></div>`);
+        }else if(loop){
+          rows.push(`<div class="pearl-row pearl-edge"><span class="pearl-n">${fmtN(counts[i])}</span><span class="pearl-mark"></span><span class="pearl-lab muted">↻</span></div>`);
+        }
+      });
+      return `<div class="pearl${loop?" loop":""}"${st}>${rows.join("")}</div>`;
+    });
+    return `<div class="pearls">${items.join("")}</div>`;
+  }
+
+  const copyBtn=document.getElementById("linesCopy");
+  function copyTsv(){
+    copyText(linesTsv(visibleGroups().groups), copyBtn);
+  }
   if(filterEl) filterEl.addEventListener("input", render);
+  if(copyBtn) copyBtn.onclick=copyTsv;
   render();
 })();

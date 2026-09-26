@@ -21,7 +21,10 @@ Die beiden Stufen können auch einzeln genutzt werden:
 | `walita.py` | Export + Dashboard (empfohlen); `--edit` startet den Tag-Editor |
 | `download_statuses.py` | Stufe 1: API → `statuses.json` / `stations.json` / `trips.json` |
 | `build_dashboard.py` | Stufe 2: JSON → `dashboard.html` |
-| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern |
+| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern; Kanten-, Stations- und Linienfarben-Patches |
+| `edge_patches.py` | Lokale Via-Patches (Default/Override) für grobe Kanten |
+| `station_patches.py` | Lokale Stations-Patches (Koordinaten verschieben, IDs mergen) |
+| `line_color_patches.py` | Lokale Linienfarben-Patches je Status |
 | `auth.py` | OAuth (Authorization Code + PKCE), von den anderen Skripten genutzt |
 
 ## Installation
@@ -41,11 +44,16 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── walita.py              # Einstiegspunkt: Export + Dashboard (+ --edit)
 ├── download_statuses.py   # Stufe 1: Export von der Träwelling-API
 ├── status_editor.py       # Tag-Editor (tkinter): Tags + Text live ändern
+├── edge_patches.py        # Lokale Via-Patches für grobe Kanten
+├── station_patches.py     # Lokale Stations-Patches (Koordinaten / Merges)
+├── line_color_patches.py  # Lokale Linienfarben-Patches je Status
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
 │   ├── template.html
 │   ├── style.css
+│   ├── edge_patch.html    # Leaflet-Karte zum Setzen von Via-Patches
+│   ├── station_patch.html # Leaflet-Karte: Koordinaten verschieben / mergen
 │   └── js/
 ├── version.py             # Version + User-Agent
 ├── operator_replacements.json  # manuelle Operator-Namen-Ersetzungen
@@ -59,7 +67,8 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ```
 
 > **Hinweis:** Eigene Reisedaten unter `data/` (`statuses.json`, `stations.json`,
-> `trips.json`, `dashboard.html`, `oauth_token.json`) sind persönlich und
+> `trips.json`, `dashboard.html`, `oauth_token.json`, `edge_patches.json`,
+> `station_patches.json`, `line_color_patches.json`) sind persönlich und
 > gitignored. Zum Ausprobieren ohne Token: [Demo](#demo).
 
 ## Voraussetzungen
@@ -172,6 +181,9 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 | `stations.json` | `station_id → {name, lat, lon, identifiers}` für die Karte; Identifier (IBNR, DHID/IFOPT, MOTIS, …) per `GET /station/{id}?withIdentifiers=true` |
 | `trips.json` | Persistenter Cache der Zwischenhalte, je Trip-ID |
 | `dashboard.html` | Selbstständiges Dashboard (von `walita` / `build_dashboard`) |
+| `edge_patches.json` | Lokale Via-Patches für grobe Kanten (Tag-Editor / Karte; kein API-Write) |
+| `station_patches.json` | Lokale Stations-Patches: Koordinaten und Merges (Tag-Editor / Karte; kein API-Write) |
+| `line_color_patches.json` | Lokale Linienfarben je Status (Tag-Editor; kein API-Write) |
 | `oauth_token.json` | OAuth Access-/Refresh-Token (gitignored) |
 
 ### Ablauf (Stufe 1)
@@ -208,6 +220,112 @@ fehlende Datei = keine Familien. Die Datei wird erst beim Dashboard-Bau
 gelesen, nicht beim Export. Die Endung `.txt` verhindert die
 Duplicate-Key-Warnung des Editors; der Loader liest alle Paare.
 
+### Kanten-Patches (physische Via-Stationen)
+
+Träwelling listet nur **bediente** Halte. Eine Kante wie Karlsruhe Hbf → Bruchsal
+ist deshalb oft zu grob. In `data/edge_patches.json` (gitignored) lassen sich
+gerichtete Kanten um bekannte Zwischenstationen anreichern – **nur lokal**,
+kein Upload. Auswertung und Karte zählen danach die topologischen Teilstücke.
+
+```json
+{
+  "defaults": [
+    { "from": 8001, "to": 8002, "via": [8100, 8101] }
+  ],
+  "overrides": [
+    { "statusId": 42, "from": 8001, "to": 8002, "via": [8102] },
+    { "statusId": 99, "from": 8001, "to": 8002, "via": [] }
+  ]
+}
+```
+
+- **Default** gilt für alle Fahrten mit genau diesem `(from, to)` (aufeinanderfolgende
+  nicht-cancelled IDs in `traveled_stopovers`).
+- **Override** nur für `statusId`; `via: []` schaltet den Default für diese Fahrt aus.
+- Via-IDs nur aus `stations.json` mit Koordinaten; `from`/`to` und auf der Fahrt
+  schon bediente IDs werden verworfen. Entfällt-Zwischenhalte gelten nicht als
+  bedient und können Via sein. Der nächste Export überschreibt `trip.stopovers`
+  – Patches leben deshalb **nicht** in `statuses.json`.
+- Fehlende Datei = keine Expansion. Pfad: `--edge-patches` (Default `data/edge_patches.json`).
+- Nach dem Speichern im Tag-Editor das Dashboard neu bauen, damit Stats und Karte
+  die Teilstücke zeigen.
+
+Im Tag-Editor listet die Sektion **Kanten** die Folge-Kanten der gewählten Fahrt
+(Standard / Fahrt / —). **Auf Karte anreichern** startet einen lokalen Server
+(`http://127.0.0.1:8711/`) und öffnet Leaflet. Auf der Karte liegen Stationen
+im 20-km-Korridor um die Luftlinie; weitere Stationen (außerhalb) per Name oder
+ID suchen und übernehmen. Speichern als Standard oder nur diese Fahrt.
+Internet nur für Kacheln.
+
+Stations-Rollen im Dashboard: **Ein-/Ausstieg** (Origin/Destination), **gehalten**
+(Träwelling-Zwischenhalt, sitzegeblieben), **physische Durchfahrt** (Via aus dem Patch).
+Zwischenhalte mit `cancelled` („Entfällt“) zählen weder als gehalten noch als
+Durchfahrt und fehlen im Knotenmodell, bis sie als Via im Patch stehen.
+Tag `dubi=start` bzw. `dubi=ende`: Origin bzw. Destination zählen als gehalten, nicht als genutzt.
+
+### Stations-Patches (Koordinaten und Merges)
+
+Träwelling-Koordinaten sitzen manchmal neben der Strecke, und dieselbe physische
+Station kann unter zwei IDs vorkommen. In `data/station_patches.json` (gitignored)
+lassen sich Marker **verschieben** und IDs **zusammenführen** – **nur lokal**,
+kein Upload. Das Overlay liegt **vor** den Kanten-Patches: Merges schreiben
+Stopover-IDs auf den Survivor um, Moves überschreiben Lat/Lon. Der nächste Export
+lässt `stations.json` / `statuses.json` unverändert.
+
+```json
+{
+  "moves": [
+    { "id": 8001, "latitude": 49.01, "longitude": 8.40 }
+  ],
+  "merges": [
+    { "from": 8002, "to": 8001 }
+  ]
+}
+```
+
+- **Move** gilt global für diese Stations-ID.
+- **Merge** `from → to`: `to` behält Name, Koordinaten und ID. Ketten werden
+  flach aufgelöst (`A→B`, `B→C` → `A→C`); Zyklen werden verworfen. Ein Move auf
+  die verschwindende `from`-ID gilt nicht für den Survivor.
+- `edge_patches.json` bleibt bei Original-IDs (Unmerge bleibt möglich); beim
+  Dashboard-Bau werden Keys und Vias im Speicher umgeschrieben.
+- Fehlende Datei = keine Änderung. Pfad: `--station-patches`
+  (Default `data/station_patches.json`).
+- Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
+
+Im Tag-Editor öffnet **Stationen anpassen** einen lokalen Server
+(`http://127.0.0.1:8712/`) mit Leaflet. Marker der befahrenen Stationen sind
+ziehbar (sofort gespeichert). Zwei Stationen wählen, **Wird aufgelöst** /
+**Bleibt**, dann **Zusammenführen**. Listen in der Sidebar setzen Moves und
+Merges zurück. Weitere Stationen per Name oder ID suchen. Internet nur für Kacheln.
+
+### Linienfarben-Patches
+
+Träwelling liefert `checkin.routeColor` manchmal unvollständig oder abweichend von
+der offiziellen Linienfarbe. In `data/line_color_patches.json` (gitignored)
+lässt sich die Farbe **je Status** setzen – **nur lokal**, kein Upload. Beim
+Dashboard-Bau überschreibt ein Patch `routeColor` / `routeTextColor` dieser
+Fahrt; die Linien-Badges nutzen die gepatchte Farbe vorrangig vor der ersten
+HAFAS-Farbe derselben Linie. Der nächste Export lässt `statuses.json`
+unverändert.
+
+```json
+{
+  "overrides": [
+    { "statusId": 42, "routeColor": "0066ad", "routeTextColor": "ffffff" }
+  ]
+}
+```
+
+- Fehlende Datei = keine Änderung. Pfad: `--line-color-patches`
+  (Default `data/line_color_patches.json`).
+- Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
+
+Im Tag-Editor zeigt **Linienfarbe** rechts zur gewählten Fahrt die aktuelle
+Farbe (Träwelling / lokal / keine). **Ändern** öffnet Hex-Eingabe und
+Farbwähler; die Textfarbe wird aus dem Kontrast gesetzt. **Zurücksetzen**
+entfernt nur den lokalen Patch.
+
 ### OAuth-Login
 
 Eine eigene Träwelling-Anwendung musst du **nicht** anlegen. Client-ID und
@@ -232,8 +350,10 @@ Wer bewusst einen eigenen Client nutzen will: `--client-id` /
 ## Dashboard (GUI)
 
 Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
-(System-Default, Auswahl in `localStorage`). Die Quellen liegen unter
-`dashboard/` und werden beim Erzeugen inline zusammengefügt. Sieben Ansichten:
+(System-Default, Auswahl in `localStorage`). Unten links in der Sidebar
+stehen der Zeitraum der Check-ins und der Zeitpunkt des letzten Builds.
+Die Quellen liegen unter `dashboard/` und werden beim Erzeugen inline
+zusammengefügt. Sieben Ansichten:
 
 - **Übersicht** – Kennzahlen (Check-ins, km, Reisezeit, Punkte, Stationen/Linien,
   Zeitraum) und meistbefahrene Segmente.
@@ -241,19 +361,26 @@ Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
   ![Übersicht](docs/screenshots/01-uebersicht.png)
 
 - **Karte** – Heatmap gerichteter Kanten entlang der tatsächlich befahrenen
-  Zwischenhalte; Filter nach Linie, Baureihe, Kategorie, Operator, Jahr.
+  Zwischenhalte; Filter nach Linie, Baureihe, Kategorie, Operator, Jahr und
+  Datumsbereich (Von/Bis). Die Überschrift nennt die gerade gesetzten Filter.
   Gemappte Baureihenfamilien erscheinen zusätzlich im Dropdown „Baureihe“
   (Auswahl der Familie zeigt alle Mitglieds-Baureihen).
   Dicke und Farbe zeigen, wie oft ein Segment befahren wurde, der Pfeil die
-  Richtung. Braucht Internet (Leaflet + Kacheln); der Rest läuft offline.
+  Richtung. Gehaltene Stationen ohne Ein-/Ausstieg erscheinen als weißer Kreis
+  mit schwarzem Rand, reine physische Durchfahrten als kleiner, gedämpfter Punkt.
+  Die Checkbox **Entdeckte Kanten** (Standard aus) legt in Grau
+  gerichtete Stopover-Paare darüber, die unter dem aktuellen Filter nicht
+  eingecheckt sind (z.B. auf dieser Linie nur im Laufweg gesehen, auf einer
+  anderen Linie aber befahren). Die übrigen Kartenfilter gelten analog.
+  Braucht Internet (Leaflet + Kacheln); der Rest läuft offline.
 
   ![Karte](docs/screenshots/02-karte-berlin.jpg)
 
-- **Linien** – alle Linien gruppiert nach Operator; je Linie die befahrenen
-  gerichteten Kanten und die Anteile der Baureihen (nach Check-ins).
+- **Linien** – alle Linien gruppiert nach Operator; je Linie aggregierte gerichtete
+  Laufwege (Perlschnur) und die Anteile der Baureihen (nach Check-ins).
 
 - **Statistiken** – Rankings zu Linien, Baureihen, Fahrzeugen und Stationen
-  (Ein-/Ausstieg/Durchfahrt, kombinierbare Filter), Kanten, Wiederholungen,
+  (Ein-/Ausstieg/gehalten/physische Durchfahrt, kombinierbare Filter), Kanten, Wiederholungen,
   Kreuztabellen.
 
   ![Statistiken](docs/screenshots/04-statistiken.png)
@@ -270,8 +397,8 @@ Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
   ![Fahrzeuge](docs/screenshots/05-fahrzeuge.png)
 
 - **Tagesziele** – Erstvorkommen und Wiederholungen an einem gewählten Tag
-  (Linien, Fahrzeuge, Top-Wagen der Baureihe, Kanten, benutzte vs. durchfahrene
-  Stationen und Kombis).
+  (Linien, Fahrzeuge, Top-Wagen der Baureihe, Kanten, benutzte vs. gehaltene vs.
+  physisch durchfahrene Stationen und Kombis).
 
   ![Tagesziele](docs/screenshots/07-tagesziele.png)
 
@@ -289,6 +416,9 @@ Nur Dashboard neu bauen:
 python3 walita.py --dashboard-only
 python3 build_dashboard.py --open
 python3 build_dashboard.py --statuses x.json --stations y.json -o out.html
+python3 build_dashboard.py --edge-patches data/edge_patches.json --open
+python3 build_dashboard.py --station-patches data/station_patches.json --open
+python3 build_dashboard.py --line-color-patches data/line_color_patches.json --open
 ```
 
 ## Tag-Editor
@@ -305,6 +435,13 @@ Gespeichert / Fehler) und schreibt den Diff nach Träwelling (`PUT /status/{id}`
 Ziel, Sichtbarkeit, Event und der Laufweg bleiben unberührt. In
 `data/statuses.json` werden nach dem Speichern nur `body` und `tags`
 aktualisiert. Weitere Tags (Sitz, Wagen, …) stehen rechts zur gewählten Fahrt.
+Die Sektion **Kanten** listet die Folge-Kanten; **Auf Karte anreichern** setzt
+lokale Via-Patches (`data/edge_patches.json`, siehe [Kanten-Patches](#kanten-patches-physische-via-stationen)).
+**Stationen anpassen** verschiebt Koordinaten und führt Stations-IDs zusammen
+(`data/station_patches.json`, siehe [Stations-Patches](#stations-patches-koordinaten-und-merges)).
+**Linienfarbe** ändert `routeColor` der gewählten Fahrt lokal
+(`data/line_color_patches.json`, siehe [Linienfarben-Patches](#linienfarben-patches)).
+Danach Dashboard neu bauen.
 
 ```bash
 python3 walita.py --edit

@@ -3,6 +3,9 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso);
   return isNaN(d)? iso : d.toLocaleDateString("de-DE",{year:"numeric",month:"2-digit",day:"2-digit"}); }
 function fmtTime(iso){ if(!iso) return "—"; const d=new Date(iso);
   return isNaN(d)? "—" : d.toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}); }
+function fmtDateTime(iso){ if(!iso) return ""; const d=new Date(iso);
+  return isNaN(d)? iso : d.toLocaleString("de-DE",{year:"numeric",month:"2-digit",day:"2-digit",
+    hour:"2-digit",minute:"2-digit"}); }
 function fmtDuration(min){ const h=Math.floor(min/60), m=min%60;
   return h? h+" h "+m+" min" : m+" min"; }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,c=>(

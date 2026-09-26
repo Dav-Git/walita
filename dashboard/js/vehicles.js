@@ -6,8 +6,10 @@
   const groupEl=document.getElementById("vehGroup");
   const opEl=document.getElementById("vehOperator");
   const catEl=document.getElementById("vehCategory");
-  const yearEl=document.getElementById("vehYear");
+  const dateFromEl=document.getElementById("vehDateFrom");
+  const dateToEl=document.getElementById("vehDateTo");
   const filterEl=document.getElementById("vehFilter");
+  const headEl=document.getElementById("vehFilterHead");
   const countEl=document.getElementById("vehCount");
   const modal=document.getElementById("vehModal");
   const modalBody=document.getElementById("vehModalBody");
@@ -27,8 +29,10 @@
     .map(o=>({value:o,label:o||"(ohne Operator)"})));
   fillSelect(catEl, uniq(V.map(r=>r.category)).filter(Boolean).sort()
     .map(c=>({value:c,label:catLabel(c)})));
-  fillSelect(yearEl, uniq(V.map(r=>(r.date||"").slice(0,4)).filter(Boolean)).sort().reverse()
-    .map(y=>({value:y,label:y})));
+  const kpis=DATA.kpis||{};
+  const vehDates=V.map(r=>(r.date||"").slice(0,10)).filter(Boolean).sort();
+  bindDateInput(dateFromEl, kpis.first||vehDates[0], kpis.last||vehDates[vehDates.length-1]);
+  bindDateInput(dateToEl, kpis.first||vehDates[0], kpis.last||vehDates[vehDates.length-1]);
 
   function cls(k){ return sortKey===k ? (sortAsc?"sorted asc":"sorted") : ""; }
 
@@ -96,47 +100,70 @@
     }
   }
 
-  function renderMatrices(){
+  function lineColLabel(key, lines){
+    const name=lineName(key)||"(ohne Linie)";
+    const same=lines.filter(l=>lineName(l)===lineName(key));
+    if(same.length<2) return name;
+    const op=lineOperator(key);
+    return op?name+" ("+op+")":name;
+  }
+  function groupTitle(name, nVeh, nRides, km){
+    return name+" · "+nVeh+" "+(nVeh===1?"Fahrzeug":"Fahrzeuge")+
+      " · ×"+nRides+" · "+km+" km";
+  }
+  function selectText(el){
+    const opt=el.selectedOptions&&el.selectedOptions[0];
+    return opt?opt.textContent:el.value;
+  }
+  function dateInRange(date){
+    const d=(date||"").slice(0,10);
+    const from=dateFromEl.value, to=dateToEl.value;
+    if(!from && !to) return true;
+    if(!d) return false;
+    return (!from || d>=from) && (!to || d<=to);
+  }
+  function activeFilterHeading(){
+    const parts=[];
+    function addSel(el, label){
+      if(!el||el.value==="__all__") return;
+      parts.push(label+" "+selectText(el));
+    }
+    addSel(opEl,"Operator");
+    addSel(catEl,"Kategorie");
+    const from=dateFromEl.value, to=dateToEl.value;
+    if(from&&to) parts.push(fmtDate(from)+"–"+fmtDate(to));
+    else if(from) parts.push("ab "+fmtDate(from));
+    else if(to) parts.push("bis "+fmtDate(to));
+    const q=filterEl.value.trim();
+    if(q) parts.push("Suche "+q);
+    const label=parts.length ? parts.join(" · ") : "Alle";
+    return "Fahrzeuge · Eingestellte Filter: "+label;
+  }
+  function buildView(){
     const groupDim=groupEl.value;
-    const op=opEl.value, cat=catEl.value, yr=yearEl.value;
+    const op=opEl.value, cat=catEl.value;
     const q=filterEl.value.toLowerCase().trim();
     const shows=selectedShows();
-    cellRegistry=[];
-
     const filtered=V.filter(r=>{
       if(op!=="__all__" && r.operator!==op) return false;
       if(cat!=="__all__" && r.category!==cat) return false;
-      if(yr!=="__all__" && (r.date||"").slice(0,4)!==yr) return false;
+      if(!dateInRange(r.date)) return false;
       if(q && !((r.vehicleNumber+" "+lineName(r.line)).toLowerCase().includes(q))) return false;
       return true;
     });
-
-    if(!V.length){
-      container.innerHTML='<p class="muted">Keine Fahrzeug-Tags vorhanden. Tagge Fahrten in '+
-        'Träwelling mit Wagennummer/Baureihe – die Tags erscheinen beim nächsten Export.</p>';
-      countEl.textContent="";
-      return;
-    }
-    if(!filtered.length){
-      container.innerHTML='<p class="muted">Keine Fahrzeuge für die gewählten Filter.</p>';
-      countEl.textContent="0 Fahrzeuge";
-      return;
-    }
-
-    // Nach Gruppierungs-Dimension gruppieren.
-    const groups=new Map();
+    if(!V.length) return {kind:"empty", shows, filtered};
+    if(!filtered.length) return {kind:"none", shows, filtered};
+    const buckets=new Map();
     filtered.forEach(r=>{
       const g=groupDim==="locClass" ? (r.locClass||"Unbekannt") : catLabel(r.category);
-      if(!groups.has(g)) groups.set(g,[]);
-      groups.get(g).push(r);
+      if(!buckets.has(g)) buckets.set(g,[]);
+      buckets.get(g).push(r);
     });
-    const groupNames=[...groups.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
     const showClass=groupDim!=="locClass";
-
-    let totalVeh=0, html="";
-    groupNames.forEach(gname=>{
-      const recs=groups.get(gname);
-      // Zeilen (Fahrzeuge) und Spalten (Linien) der Gruppe sammeln.
+    const groups=[];
+    let totalVeh=0;
+    [...buckets.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(gname=>{
+      const recs=buckets.get(gname);
       const rowMap=new Map();
       const lineSet=new Set();
       recs.forEach(r=>{
@@ -159,7 +186,59 @@
       markStreaks(rowArr);
       totalVeh+=rowArr.length;
       const groupKm=Math.round(recs.reduce((s,r)=>s+(r.distanceKm||0),0)*10)/10;
+      groups.push({
+        name:gname,
+        title:groupTitle(gname, rowArr.length, recs.length, groupKm),
+        lines, rows:rowArr, km:groupKm,
+      });
+    });
+    return {kind:"ok", shows, showClass, filtered, totalVeh, groups};
+  }
 
+  function vehiclesTsv(view){
+    const head=tsvCell(activeFilterHeading());
+    if(!view||view.kind==="empty") return head+"\nKeine Fahrzeug-Tags vorhanden.";
+    if(view.kind==="none") return head+"\nKeine Fahrzeuge für die gewählten Filter.";
+    return head+"\n\n"+view.groups.map(g=>{
+      const headers=["Wagen"];
+      if(view.showClass) headers.push("Baureihe");
+      headers.push("zuerst","zuletzt","Fahrten","km");
+      g.lines.forEach(l=>headers.push(lineColLabel(l, g.lines)));
+      const lines=[g.title, headers.join("\t")];
+      g.rows.forEach(row=>{
+        const cells=[row.number];
+        if(view.showClass) cells.push(row.locClass||"");
+        cells.push(fmtDate(row.first), fmtDate(row.last), row.count, row.km);
+        g.lines.forEach(l=>{
+          const cr=row.recs.filter(x=>x.line===l);
+          cells.push(cr.length?cellText(cr, view.shows):"");
+        });
+        lines.push(cells.map(tsvCell).join("\t"));
+      });
+      return lines.join("\n");
+    }).join("\n\n");
+  }
+
+  function renderMatrices(){
+    if(headEl) headEl.textContent=activeFilterHeading();
+    const view=buildView();
+    cellRegistry=[];
+    if(view.kind==="empty"){
+      container.innerHTML='<p class="muted">Keine Fahrzeug-Tags vorhanden. Tagge Fahrten in '+
+        'Träwelling mit Wagennummer/Baureihe – die Tags erscheinen beim nächsten Export.</p>';
+      countEl.textContent="";
+      return;
+    }
+    if(view.kind==="none"){
+      container.innerHTML='<p class="muted">Keine Fahrzeuge für die gewählten Filter.</p>';
+      countEl.textContent="0 Fahrzeuge";
+      return;
+    }
+    const showClass=view.showClass;
+    const shows=view.shows;
+    let html="";
+    view.groups.forEach(g=>{
+      const lines=g.lines;
       const head=`<tr>
         <th class="sticky lbl ${cls('vehicleNumber')}" data-k="vehicleNumber">Wagen</th>
         ${showClass?'<th class="lbl">Baureihe</th>':''}
@@ -171,7 +250,7 @@
           return `<th class="lbl lineh"><span class="line-badge"${st}>${esc(lineName(l))}</span></th>`;
         }).join("")}
       </tr>`;
-      const body=rowArr.map(row=>{
+      const body=g.rows.map(row=>{
         const cells=lines.map(l=>{
           const cr=row.recs.filter(x=>x.line===l);
           if(!cr.length) return "<td></td>";
@@ -189,12 +268,11 @@
           <td class="lbl">${fmtDate(row.last)}</td>
           ${cells}</tr>`;
       }).join("");
-      html+=`<div class="matrix-wrap"><h3>${esc(gname)} · ${rowArr.length} `+
-        `${rowArr.length===1?"Fahrzeug":"Fahrzeuge"} · ×${recs.length} · ${groupKm} km</h3>`+
+      html+=`<div class="matrix-wrap"><h3>${esc(g.title)}</h3>`+
         `<table class="matrix"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
     });
     container.innerHTML=html;
-    countEl.textContent=totalVeh+" Fahrzeuge · "+filtered.length+" Fahrten";
+    countEl.textContent=view.totalVeh+" Fahrzeuge · "+view.filtered.length+" Fahrten";
   }
 
   function openModal(ci){
@@ -226,8 +304,14 @@
   document.getElementById("vehModalClose").onclick=closeModal;
   modal.addEventListener("click",e=>{ if(e.target===modal) closeModal(); });
   document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
-  [groupEl,opEl,catEl,yearEl].forEach(el=>el.onchange=renderMatrices);
+  [groupEl,opEl,catEl].forEach(el=>el.onchange=renderMatrices);
+  [dateFromEl,dateToEl].forEach(el=>{
+    el.onchange=renderMatrices;
+    el.oninput=renderMatrices;
+  });
   filterEl.oninput=renderMatrices;
+  const copyBtn=document.getElementById("vehCopy");
+  if(copyBtn) copyBtn.onclick=()=>copyText(vehiclesTsv(buildView()), copyBtn);
   document.querySelectorAll('input[name="vehShow"]').forEach(el=>{
     el.addEventListener("change",()=>{
       if(!selectedShows().length){ el.checked=true; return; }

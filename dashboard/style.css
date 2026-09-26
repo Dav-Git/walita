@@ -54,6 +54,7 @@
   .sidebar-foot { padding:14px 16px; border-top:1px solid var(--sidebar-border);
         display:flex; flex-direction:column; gap:10px; }
   .sidebar-foot .sub { color:var(--sidebar-muted); font-size:12px; }
+  .sidebar-foot .built-at { font-size:11px; margin-top:-6px; }
   .theme-toggle { display:flex; align-items:center; justify-content:center; gap:8px;
         background:var(--sidebar-active); color:var(--sidebar-fg); border:none;
         border-radius:9px; padding:9px 12px; cursor:pointer; font-size:13px; font-weight:500; }
@@ -76,6 +77,7 @@
              letter-spacing:.05em; margin-top:6px; font-weight:600; }
   h3 { font-size:16px; font-weight:700; }
 
+  .map-filter-head { margin:0 0 10px; font-size:15px; font-weight:700; }
   #mapview { height:74vh; border:1px solid var(--border); border-radius:var(--radius);
         background:var(--panel2); box-shadow:var(--shadow); }
   .legend { background:var(--panel); padding:9px 12px; border-radius:10px;
@@ -231,33 +233,60 @@
   .daily-group > h3 { margin:0 0 12px; font-size:17px; }
   table.stats tr.daily-implied td { background:var(--panel2); color:var(--muted); }
 
-  /* ---- Linien-Katalog ---- */
-  .line-op { margin:0 0 28px; }
-  .line-op > h3 { margin:0 0 12px; font-size:17px; }
-  .line-op > h3 .muted { font-weight:500; font-size:13px; }
-  .line-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
-        box-shadow:var(--shadow); margin:0 0 12px; }
-  .line-card > summary { list-style:none; cursor:pointer; padding:14px 16px;
-        display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  /* ---- Linien-Katalog (dicht) ---- */
+  #lines.tab { padding:12px 14px 16px; font-size:13px; line-height:1.3; }
+  #lines .tab-head { margin:0 0 6px; }
+  #lines .tab-head h2 { font-size:18px; }
+  #lines .tab-head p { margin:0; font-size:12px; line-height:1.25; }
+  #lines .map-filter-head { margin:0 0 4px; font-size:13px; }
+  #lines .toolbar { margin-bottom:8px; gap:6px 8px; padding:4px 8px; border-radius:8px; }
+  #lines input[type=search] { padding:4px 8px; border-radius:6px; width:220px; font-size:13px; }
+  #lines .toolbar-btn { padding:4px 8px; border-radius:6px; font-size:12px; }
+  #lines .line-badge { padding:0 4px; font-size:11px; line-height:16px; }
+  .line-op { margin:0 0 10px; }
+  .line-op > h3 { margin:0 0 3px; font-size:14px; line-height:1.25; }
+  .line-op > h3 .muted { font-weight:500; font-size:12px; }
+  .line-card { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+        margin:0 0 3px; }
+  .line-card > summary { list-style:none; cursor:pointer; padding:3px 8px;
+        display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
   .line-card > summary::-webkit-details-marker { display:none; }
-  .line-card > summary::before { content:"▸"; color:var(--muted); font-size:12px;
+  .line-card > summary::before { content:"▸"; color:var(--muted); font-size:11px;
         flex:0 0 auto; line-height:1; }
   .line-card[open] > summary::before { content:"▾"; }
-  .line-card-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
-  .line-card-meta { color:var(--muted); font-size:13px; }
-  .line-card-body { padding:0 16px 14px; }
-  .line-stack { display:flex; height:10px; border-radius:5px; overflow:hidden;
-        background:var(--panel2); margin:0 0 8px; }
+  .line-card-head { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
+  .line-card-meta { color:var(--muted); font-size:12px; }
+  .line-card-body { padding:0 8px 4px; display:flex; flex-wrap:wrap; align-items:center;
+        column-gap:8px; row-gap:2px; }
+  .line-card-body > .hint { flex:1 0 100%; margin:2px 0 0; font-size:12px; }
+  .line-stack { display:flex; flex:1 1 7em; min-width:6em; height:6px; border-radius:3px;
+        overflow:hidden; background:var(--panel2); margin:0; }
   .line-stack > i { display:block; height:100%; min-width:0; }
-  .line-stack-legend { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:12px; color:var(--muted); }
-  .line-stack-legend span { display:inline-flex; align-items:center; gap:6px; }
-  .line-stack-legend i { display:inline-block; width:8px; height:8px; border-radius:2px; flex:0 0 8px; }
-  table.line-edges { width:100%; margin-top:10px; }
-  table.line-edges th, table.line-edges td { padding:6px 8px; font-size:12px;
-        border-bottom:1px solid var(--border); }
-  table.line-edges th { color:var(--muted); cursor:default; font-weight:600; }
-  table.line-edges td.n { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-  table.line-edges tr:last-child td { border-bottom:none; }
+  .line-stack-legend { display:flex; flex:3 1 14em; flex-wrap:wrap; gap:0 8px;
+        font-size:11px; line-height:1.25; color:var(--muted); }
+  .line-stack-legend span { display:inline-flex; align-items:center; gap:3px; }
+  .line-stack-legend i { display:inline-block; width:6px; height:6px; border-radius:2px; flex:0 0 6px; }
+  .pearls { display:flex; flex:1 0 100%; flex-wrap:nowrap; align-items:flex-start; gap:4px 10px;
+        margin:2px 0 0; overflow-x:auto; padding-bottom:2px; }
+  .pearl { flex:1 0 156px; min-width:156px; }
+  .pearl-row { display:grid; grid-template-columns:2.6em 12px 1fr; column-gap:3px;
+        align-items:stretch; min-height:1.05em; }
+  .pearl-edge { min-height:1.05em; }
+  .pearl-n { text-align:right; font-variant-numeric:tabular-nums; font-size:10px;
+        color:var(--muted); align-self:center; line-height:1; padding-right:1px; }
+  .pearl-mark { position:relative; }
+  .pearl-mark::before { content:""; position:absolute; left:5px; top:0; bottom:0; width:2px;
+        background:var(--pearl, var(--fg)); }
+  .pearl > .pearl-stop:first-child .pearl-mark::before { top:50%; }
+  .pearl:not(.loop) > .pearl-stop:last-child .pearl-mark::before { bottom:50%; }
+  .pearl.loop > .pearl-edge:last-child .pearl-mark::before { bottom:35%; }
+  .pearl-stop .pearl-mark i { position:absolute; left:2.5px; top:50%; width:7px; height:7px;
+        margin-top:-3.5px; border-radius:50%; background:var(--pearl, var(--fg));
+        box-shadow:0 0 0 1px var(--panel); z-index:1; }
+  .pearl-lab { padding:0; font-size:12px; line-height:1.15; overflow-wrap:anywhere; }
+  .pearl-stop.used .pearl-lab { font-weight:700; }
+  .pearl-stop.used-line .pearl-lab { text-decoration:underline; }
+  .pearl-stop.pass .pearl-lab { font-style:italic; color:var(--muted); }
 
   /* ---- Mobile: Sidebar wird zur oberen Leiste ---- */
   .navtoggle { display:none; }

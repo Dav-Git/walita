@@ -6,7 +6,7 @@
 Auswertungen:
 - Kennzahlen-Übersicht (Check-ins, km, Reisezeit, Punkte, Stationen/Linien, Zeitraum)
 - Statistiken zu Linien, Baureihen, Fahrzeugen und Stationen
-  (Ein-/Ausstieg/Durchfahrt, Rankings, Unique-Kombis, Kreuztabellen)
+  (Ein-/Ausstieg/gehalten/physische Durchfahrt, Rankings, Unique-Kombis, Kreuztabellen)
 - Geo-Karte mit Heatmap gerichteter Kanten: pro Fahrt werden die tatsächlich
   befahrenen aufeinanderfolgenden Zwischenhalte als gerichtete Segmente gezählt;
   häufiger befahrene Segmente werden dicker/röter dargestellt.
@@ -28,6 +28,13 @@ import sys
 from collections import Counter
 from datetime import datetime
 
+from edge_patches import expand_edge_stopovers, load_patches
+from line_color_patches import apply_to_statuses as apply_line_color_patches
+from line_color_patches import load_patches as load_line_color_patches
+from line_color_patches import status_id as color_status_id
+from line_color_patches import to_css_pair
+from station_patches import apply_station_patches
+from station_patches import load_patches as load_station_patches
 from version import __version__
 
 
@@ -54,6 +61,24 @@ def json_for_script(data):
     ):
         blob = blob.replace(raw, escaped)
     return blob
+
+
+def dubi_flags(tags):
+    """Origin/Destination nur gehalten: Tag ``dubi=start`` bzw. ``dubi=ende``.
+
+    Format: Schlüssel ``dubi`` mit Wert ``start``/``ende``, oder der ganze
+    String als Schlüssel. Groß/Kleinschreibung egal. Rückgabe: (start, ende).
+    """
+    start = False
+    ende = False
+    for t in tags or []:
+        key = (t.get("key") or "").strip().lower()
+        val = (t.get("value") or "").strip().lower()
+        if key == "dubi=start" or (key == "dubi" and val == "start"):
+            start = True
+        elif key == "dubi=ende" or (key == "dubi" and val == "ende"):
+            ende = True
+    return start, ende
 
 
 def parse_dt(value):
@@ -121,6 +146,29 @@ def split_line_key(lk):
     if i < 0:
         return s, ""
     return s[:i], s[i + 1:]
+
+
+def vehicle_identity(loc_class, number):
+    """Fahrzeug intern als (Baureihe, Nummer).
+
+    Gleiche Nummern verschiedener Baureihen bleiben getrennte Fahrzeuge.
+    Fehlende Baureihe ist ein eigener Schlüssel und fällt nicht mit einer
+    getaggten Baureihe derselben Nummer zusammen.
+    """
+    return (loc_class or "", number or "")
+
+
+def vehicle_cross_key(loc_class, number):
+    """Zeilenschlüssel der Fahrzeug-Kreuztabellen.
+
+    Nummer + Baureihe, damit gleiche Nummern nicht zusammenfallen. Die
+    Baureihe hängt hinter ``LINE_SEP`` und wird nicht mit angezeigt.
+    """
+    num = number or ""
+    loc = loc_class or ""
+    if num and loc:
+        return f"{num}{LINE_SEP}{loc}"
+    return num or loc
 
 
 def delay_bucket(delay):
@@ -213,8 +261,13 @@ class EntityAgg:
             self.loc_classes.add(loc_class)
             self.loc_class_counts[loc_class] += 1
         for v in vehicles or ():
-            if v:
-                self.vehicles.add(v)
+            # Identität ist (Baureihe, Nummer); nackte Nummern zählen als ohne BR.
+            if isinstance(v, tuple):
+                loc, num = v[0], v[1] if len(v) > 1 else ""
+                if num:
+                    self.vehicles.add((loc or "", num))
+            elif v:
+                self.vehicles.add(("", v))
 
     def to_row(self, key, kind):
         """Serialisiert den Bucket; `kind` steuert die unique-*-Felder."""
@@ -252,16 +305,24 @@ class EntityAgg:
             row["uniqueLines"] = len(self.lines)
         elif kind == "vehicle":
             row["uniqueLines"] = len(self.lines)
-            if self.loc_class_counts:
-                row["locClass"] = self.loc_class_counts.most_common(1)[0][0]
-            else:
-                row["locClass"] = ""
         return row
 
 
 def _finalize_entities(aggs, kind, limit=None):
-    rows = [a.to_row(k, kind) for k, a in aggs.items() if k]
-    rows.sort(key=lambda r: (-r["distanceKm"], -r["count"], r["key"]))
+    rows = []
+    for k, a in aggs.items():
+        if kind == "vehicle":
+            loc, num = k
+            if not num:
+                continue
+            row = a.to_row(num, kind)
+            row["locClass"] = loc or ""
+            rows.append(row)
+        elif k:
+            rows.append(a.to_row(k, kind))
+    rows.sort(key=lambda r: (
+        -r["distanceKm"], -r["count"], str(r["key"]), str(r.get("locClass") or ""),
+    ))
     if limit is not None:
         rows = rows[:limit]
     return rows
@@ -299,8 +360,12 @@ class EdgeAgg:
         if loc_class:
             self.loc_classes.add(loc_class)
         for v in vehicles or ():
-            if v:
-                self.vehicles.add(v)
+            if isinstance(v, tuple):
+                loc, num = v[0], v[1] if len(v) > 1 else ""
+                if num:
+                    self.vehicles.add((loc or "", num))
+            elif v:
+                self.vehicles.add(("", v))
 
     def to_row(self):
         return {
@@ -316,11 +381,13 @@ class EdgeAgg:
 
 
 class StationAgg:
-    """Akkumulator für Stationen: Einstieg / Ausstieg / Durchfahrt."""
+    """Akkumulator für Stationen: Einstieg / Ausstieg / gehalten / physisch."""
 
     __slots__ = (
-        "name", "boarded", "alighted", "through", "first", "last", "dates", "lines",
+        "name", "boarded", "alighted", "through", "passed",
+        "first", "last", "dates", "lines",
         "first_used", "dates_used", "first_through", "dates_through",
+        "first_pass", "dates_pass",
     )
 
     def __init__(self, name=""):
@@ -328,6 +395,7 @@ class StationAgg:
         self.boarded = 0
         self.alighted = 0
         self.through = 0
+        self.passed = 0
         self.first = None
         self.last = None
         self.dates = set()
@@ -336,6 +404,8 @@ class StationAgg:
         self.dates_used = set()
         self.first_through = None
         self.dates_through = set()
+        self.first_pass = None
+        self.dates_pass = set()
 
     def _touch(self, date_str, line=""):
         if date_str:
@@ -376,13 +446,26 @@ class StationAgg:
         self._touch(date_str, line)
         self._touch_through(date_str)
 
+    def _touch_pass(self, date_str):
+        if not date_str:
+            return
+        self.dates_pass.add(date_str)
+        if self.first_pass is None or date_str < self.first_pass:
+            self.first_pass = date_str
+
+    def add_pass(self, date_str, line=""):
+        self.passed += 1
+        self._touch(date_str, line)
+        self._touch_pass(date_str)
+
     def to_row(self):
         return {
             "key": self.name,
             "boarded": self.boarded,
             "alighted": self.alighted,
             "through": self.through,
-            "total": self.boarded + self.alighted + self.through,
+            "passed": self.passed,
+            "total": self.boarded + self.alighted + self.through + self.passed,
             "first": self.first,
             "last": self.last,
             "uniqueLines": len(self.lines),
@@ -419,6 +502,158 @@ def _get_dated(mapping, key):
         a = DatedCombo()
         mapping[key] = a
     return a
+
+
+class LineStationRole:
+    """Rollen einer Station auf einer Linie (Ein/Aus/gehalten/Durchfahrt)."""
+
+    __slots__ = ("boarded", "alighted", "through", "passed")
+
+    def __init__(self):
+        self.boarded = 0
+        self.alighted = 0
+        self.through = 0
+        self.passed = 0
+
+
+# Perlschnur-Flags je Halt: global Ein/Aus, Ein/Aus auf der Linie, nur Durchfahrt.
+ROUTE_FLAG_USED = 1
+ROUTE_FLAG_USED_LINE = 2
+ROUTE_FLAG_PASS_ONLY = 4
+
+
+def cover_directed_paths(edge_counts, name_of, seq_counts=None):
+    """Überdeckt gerichtete Kanten durch häufigste Kantenfolgen (greedy).
+
+    An Verzweigungen gewinnt die Folge, die am oftsten hintereinander befahren
+    wurde (A→B→C häufiger als A→B→D). Bei gleicher Folgehäufigkeit der längere
+    Restweg. Unverzweigte Ketten werden mitgenommen. Unmittelbare Gegenkante
+    (nach A→B nicht B→A) ist unzulässig; Stationen dürfen sonst wieder
+    vorkommen (Rundfahrt). Kanten auf dem aktuellen Pfad nicht wiederholen.
+    `edge_counts`: {(a_id, b_id): count}. `seq_counts`: {(a, b, c): count}.
+    `name_of(id)` für den Tie-Break. Rückgabe: [{"loop", "ids", "counts"}, ...]
+    """
+    unused = dict(edge_counts)
+    seq = seq_counts or {}
+    routes = []
+
+    def adj():
+        fwd, rev = {}, {}
+        for a, b in unused:
+            fwd.setdefault(a, []).append(b)
+            rev.setdefault(b, []).append(a)
+        return fwd, rev
+
+    def path_edge(u, v, forward):
+        return (u, v) if forward else (v, u)
+
+    def max_chain(start, prev, used_edges, nbrs, forward):
+        best = 0
+
+        def dfs(u, prev_u, n, used):
+            nonlocal best
+            if n > best:
+                best = n
+            for w in nbrs.get(u, ()):
+                if w == prev_u:
+                    continue
+                edge = path_edge(u, w, forward)
+                if edge in used or edge not in unused:
+                    continue
+                dfs(w, u, n + 1, used | {edge})
+
+        dfs(start, prev, 0, used_edges)
+        return best
+
+    def pick_hop(path, used_edges, forward, fwd, rev):
+        if forward:
+            u = path[-1]
+            pred = path[-2] if len(path) >= 2 else None
+            nbrs = fwd
+        else:
+            u = path[0]
+            pred = path[1] if len(path) >= 2 else None
+            nbrs = rev
+        cands = []
+        for v in nbrs.get(u, ()):
+            if pred is not None and v == pred:
+                continue
+            edge = path_edge(u, v, forward)
+            if edge in used_edges or edge not in unused:
+                continue
+            cands.append(v)
+        if not cands:
+            return None
+        if len(cands) == 1:
+            return cands[0]
+
+        def key(v):
+            edge = path_edge(u, v, forward)
+            extra = used_edges | {edge}
+            if pred is None:
+                freq = unused.get(edge, 0)
+            elif forward:
+                freq = seq.get((pred, u, v), 0)
+            else:
+                freq = seq.get((v, u, pred), 0)
+            return (
+                -freq,
+                -max_chain(v, u, extra, nbrs, forward),
+                name_of(v),
+            )
+
+        cands.sort(key=key)
+        return cands[0]
+
+    def grow():
+        if not unused:
+            return None
+        seed = None
+        for (a, b), n in unused.items():
+            cand = (n, name_of(a), name_of(b), a, b)
+            if seed is None or cand[0] > seed[0] or (
+                cand[0] == seed[0] and cand[1:3] < seed[1:3]
+            ):
+                seed = cand
+        path = [seed[3], seed[4]]
+        used_edges = {(seed[3], seed[4])}
+        while True:
+            fwd, rev = adj()
+            nxt = pick_hop(path, used_edges, True, fwd, rev)
+            if nxt is None:
+                break
+            used_edges.add((path[-1], nxt))
+            path.append(nxt)
+        while True:
+            fwd, rev = adj()
+            prv = pick_hop(path, used_edges, False, fwd, rev)
+            if prv is None:
+                break
+            used_edges.add((prv, path[0]))
+            path.insert(0, prv)
+        return path, used_edges
+
+    while unused:
+        grown = grow()
+        if not grown:
+            break
+        path, used_edges = grown
+        if not path or len(path) < 2:
+            break
+        counts = [unused[(a, b)] for a, b in zip(path, path[1:])]
+        for a, b in zip(path, path[1:]):
+            unused.pop((a, b), None)
+        loop = False
+        if len(path) > 2 and path[0] == path[-1]:
+            loop = True
+        elif len(path) > 2:
+            close = (path[-1], path[0])
+            last_rev = (path[-1], path[-2])
+            if close in unused and close not in used_edges and close != last_rev:
+                counts.append(unused.pop(close))
+                loop = True
+        routes.append({"loop": loop, "ids": path, "counts": counts})
+    return routes
 
 
 def _bump_cross(store, row, col, km):
@@ -524,6 +759,28 @@ def traveled_stopovers(status):
     return stopovers[i_start : i_end + 1]
 
 
+def consecutive_station_pairs(stopovers):
+    """Gerichtete Paare aufeinanderfolgender, nicht-cancelled Stationen.
+
+    Ausgefallene Zwischenhalte werden übersprungen (A→B✕→C wird zu A→C).
+    Paare ohne IDs oder mit identischer Station entfallen. Rückgabe:
+    [(a_id, b_id, a_name, b_name), ...].
+    """
+    kept = [s for s in (stopovers or []) if not s.get("cancelled")]
+    out = []
+    for a, b in zip(kept, kept[1:]):
+        a_id, b_id = a.get("id"), b.get("id")
+        if a_id is None or b_id is None or a_id == b_id:
+            continue
+        out.append((
+            a_id,
+            b_id,
+            a.get("name") or "",
+            b.get("name") or "",
+        ))
+    return out
+
+
 def load_loc_class_families(path):
     """Liest die manuelle Baureihe→Familie-Zuordnung.
 
@@ -586,14 +843,29 @@ def pack_loc_class_families(mapping, variants):
     return {fam: sorted(cls) for fam, cls in sorted(members.items())}
 
 
-def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
+def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
+               edge_patches=None, station_patches=None, line_color_patches=None):
     """Berechnet KPIs, Tabellenzeilen und Kanten für das Dashboard.
 
     `ignore_plus`: wenn True, werden Wagennummern-Tags nicht am '+' getrennt
     (Doppeltraktion wie "463001+463501" bleibt ein Fahrzeug); Standard trennt.
     `loc_class_families`: optionales Mapping Baureihe → [Familie, ...] für den
     Kartenfilter (nur Familien mit mindestens einem Treffer in den Daten).
+    `edge_patches`: optionale Default-/Override-Via-Stationen (siehe
+    edge_patches.py); fehlend = keine Expansion.
+    `station_patches`: optionale Koordinaten-Moves und ID-Merges (siehe
+    station_patches.py); werden vor traveled_stopovers / Edge-Patches angewandt.
+    `line_color_patches`: optionale routeColor-Overrides je Status (siehe
+    line_color_patches.py); gelten vor der Linienfarben-Sammlung.
     """
+    sp = station_patches or {}
+    if (sp.get("moves") or sp.get("merges")):
+        stations, statuses, edge_patches = apply_station_patches(
+            station_patches, stations, statuses, edge_patches
+        )
+    color_over = (line_color_patches or {}).get("overrides") or {}
+    if color_over:
+        statuses = apply_line_color_patches(line_color_patches, statuses)
     total_distance_m = 0
     total_duration_min = 0
     total_points = 0
@@ -607,6 +879,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
     node_counter = Counter()       # station_id -> Befahrungen (eine je Station pro Fahrt)
     edge_names = {}                # id -> Name (für Anzeige)
     line_colors = {}               # lineKey (Name+Operator) -> [bg, fg]
+    patched_line_keys = set()      # Linien, deren Farbe aus einem Status-Patch kommt
     # Nach Fahrt-Attributen (Linie, Baureihe, Kategorie, Operator, Jahr)
     # aufgeschlüsselte Zähler für die filterbare Karte; JS summiert später die zum
     # Filter passenden Buckets auf. Die Attribut-Kombis werden beim Serialisieren
@@ -614,17 +887,25 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
     edge_lc = Counter()            # (id_from, id_to, *variant) -> Anzahl
     node_lc = Counter()            # (station_id, *variant) -> Befahrungen
     node_lc_used = Counter()       # (station_id, *variant) -> Ein-/Ausstiege
+    node_lc_held = Counter()       # (station_id, *variant) -> gehalten (sitzegeblieben)
+    node_lc_pass = Counter()       # (station_id, *variant) -> physische Durchfahrt
     # Fahrzeug-Buckets separat: Mehrfachwagen würden in der Variante beim
     # Aufsummieren von "Alle" doppelt zählen. Bei Fahrzeug-Filter greift JS
     # auf diese Buckets zu; ohne Filter bleiben edge_lc/node_lc maßgeblich.
     edge_veh = Counter()           # (id_from, id_to, veh_key, *variant) -> Anzahl
     node_veh = Counter()           # (station_id, veh_key, *variant) -> Befahrungen
+    # Entdeckte Kanten je Fahrt/Variante (volle Stopovers minus Check-in dieser
+    # Fahrt). Nicht global abziehen: eine auf Linie A befahrene Kante bleibt
+    # für Linie B entdeckt, wenn B sie nur im Laufweg gesehen hat.
+    discovered_candidates = []     # (a_id, b_id, variant, veh_keys)
     node_veh_used = Counter()      # (station_id, veh_key, *variant) -> Ein-/Ausstiege
+    node_veh_held = Counter()      # (station_id, veh_key, *variant) -> gehalten
+    node_veh_pass = Counter()      # (station_id, veh_key, *variant) -> physische Durchfahrt
 
     # Statistik-Akkumulatoren (Linie / Baureihe / Fahrzeug + Kreuztabellen).
     line_aggs = {}
     loc_aggs = {}
-    veh_aggs = {}
+    veh_aggs = {}  # (locClass, number) -> EntityAgg
     cross_stores = {
         "crossLocClassLine": {},
         "crossVehicleLine": {},
@@ -639,23 +920,25 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         "crossVehicleMonth": {},
     }
     # Unique-Kombis mit first/last (für Tagesziele + KPI-Zähler).
-    line_vehicle = {}  # (lineKey, veh) -> DatedCombo
+    line_vehicle = {}  # (lineKey, locClass, veh) -> DatedCombo
     line_loc = {}  # (lineKey, locClass) -> DatedCombo
     vehicle_loc = {}  # (veh, locClass) -> DatedCombo
     uniq_routes = set()
     station_line = {}  # (station_id, lineKey) -> DatedCombo
+    line_station_role = {}  # (station_id, lineKey) -> LineStationRole
     trips_with_loc = 0
     trips_with_veh = 0
     min_trip = None  # {line, from, to, km, date}
     max_trip = None
     # Segmentkanten + Wiederholungs-Kombis für Statistik-Tab.
     edge_aggs = {}  # (from_id, to_id) -> EdgeAgg
-    veh_edge = {}  # (veh, from_id, to_id) -> DatedCombo
-    veh_edge_line = {}  # (veh, from_id, to_id, lineKey) -> DatedCombo
+    veh_edge = {}  # (locClass, veh, from_id, to_id) -> DatedCombo
+    veh_edge_line = {}  # (locClass, veh, from_id, to_id, lineKey) -> DatedCombo
     line_edge = {}  # (lineKey, from_id, to_id) -> DatedCombo
+    line_seq = Counter()  # (lineKey, a_id, b_id, c_id) -> aufeinanderfolgende Kanten
     loc_edge = {}  # (locClass, from_id, to_id) -> DatedCombo
     loc_edge_line = {}  # (locClass, from_id, to_id, lineKey) -> DatedCombo
-    station_aggs = {}  # station_id -> StationAgg (Ein/Aus/Durch)
+    station_aggs = {}  # station_id -> StationAgg (Ein/Aus/gehalten/physisch)
 
     def get_agg(mapping, key):
         a = mapping.get(key)
@@ -680,6 +963,16 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         elif name and (not a.name or a.name == str(sid)):
             a.name = name
         return a
+
+    def mark_line_role(sid, lk, attr):
+        if sid is None or not lk:
+            return
+        key = (sid, lk)
+        r = line_station_role.get(key)
+        if r is None:
+            r = LineStationRole()
+            line_station_role[key] = r
+        setattr(r, attr, getattr(r, attr) + 1)
 
     for status in statuses:
         checkin = status.get("checkin") or {}
@@ -710,13 +1003,20 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         lk = line_key(line_name, operator) if line_name or operator else ""
         if lk:
             lines.add(lk)
-        # Linienfarbe (Hintergrund/Text) aus dem Check-in; je (Linie, Operator) einmal.
-        rc = checkin.get("routeColor")
-        if lk and rc and lk not in line_colors:
-            bg = rc if rc.startswith("#") else "#" + rc
-            rtc = checkin.get("routeTextColor") or "000000"
-            fg = rtc if rtc.startswith("#") else "#" + rtc
-            line_colors[lk] = [bg, fg]
+        # Linienfarbe (Hintergrund/Text) aus dem Check-in; je (Linie, Operator)
+        # einmal. Ein lokaler Status-Patch überschreibt die HAFAS-Farbe der Linie.
+        pair = to_css_pair(
+            checkin.get("routeColor"), checkin.get("routeTextColor")
+        )
+        if lk and pair:
+            sid = color_status_id(status.get("id"))
+            is_patch = sid is not None and sid in color_over
+            if is_patch:
+                if lk not in patched_line_keys:
+                    line_colors[lk] = pair
+                    patched_line_keys.add(lk)
+            elif lk not in patched_line_keys and lk not in line_colors:
+                line_colors[lk] = pair
         tags = status.get("tags") or []
         loc_class = next(
             (
@@ -738,6 +1038,8 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         veh_numbers = [
             n.strip() for v in veh_values for n in re.split(sep, v) if n.strip()
         ]
+        # Statistik zählt Fahrzeuge als (Baureihe, Nummer), nicht nur die Nummer.
+        veh_ids = [vehicle_identity(loc_class, n) for n in veh_numbers]
 
         # Attribut-Variante dieser Fahrt für die filterbaren Karten-Buckets:
         # (Linien-Key, Baureihe, Kategorie, Operator, Datum). Das Jahr-Dropdown
@@ -752,78 +1054,160 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         # je Fahrt zählt jede Station nur einmal (trip-lokales Set); über mehrere
         # Fahrten hinweg summieren sich die Befahrungen aber weiter auf.
         seen_in_trip = set()
-        for s in segment:
-            sid = s.get("id")
+
+        def touch_visit(sid, name=None):
             if sid is None:
-                continue
+                return
             station_ids.add(sid)
-            edge_names[sid] = s.get("name")
+            if name:
+                edge_names[sid] = name
+            elif sid not in edge_names:
+                edge_names[sid] = str(sid)
             if sid not in seen_in_trip:
                 seen_in_trip.add(sid)
                 node_counter[sid] += 1
                 node_lc[(sid, *variant)] += 1
                 for vk in veh_keys:
                     node_veh[(sid, vk, *variant)] += 1
+
         def mark_used_node(sid):
             """Ein-/Ausstieg dieser Fahrt für die Karten-Marker (filtertreu)."""
             node_lc_used[(sid, *variant)] += 1
             for vk in veh_keys:
                 node_veh_used[(sid, vk, *variant)] += 1
 
-        # Station-Rollen: Einstieg = segment[0], Ausstieg = segment[-1],
-        # Durchfahrt = Zwischenhalte (pro Fahrt je Station-ID einmal).
-        # len==1: dieselbe Station zählt als Ein und Aus, nicht als Durchfahrt.
+        def mark_held_node(sid):
+            node_lc_held[(sid, *variant)] += 1
+            for vk in veh_keys:
+                node_veh_held[(sid, vk, *variant)] += 1
+
+        def mark_pass_node(sid):
+            node_lc_pass[(sid, *variant)] += 1
+            for vk in veh_keys:
+                node_veh_pass[(sid, vk, *variant)] += 1
+
+        # Entfällt-Zwischenhalte weder als Knoten noch als gehalten. Ein- und
+        # Ausstieg bleiben, auch wenn der Halt selbst cancelled ist.
+        n_seg = len(segment)
+        for i, s in enumerate(segment):
+            if s.get("cancelled") and 0 < i < n_seg - 1:
+                continue
+            sid = s.get("id")
+            if sid is None:
+                continue
+            touch_visit(sid, s.get("name"))
+
+        # Station-Rollen auf der *Original*-Haltfolge: Einstieg = segment[0],
+        # Ausstieg = segment[-1], gehalten = nicht-cancelled Träwelling-Zwischenhalte.
+        # dubi=start / dubi=ende: Origin/Destination zählen als gehalten, nicht genutzt.
+        # len==1: dieselbe Station zählt als Ein und Aus, nicht als gehalten
+        # (außer wenn dubi das jeweilige Ende auf gehalten umbiegt).
+        dubi_start, dubi_ende = dubi_flags(tags)
         if segment:
             s0 = segment[0]
             sid0 = s0.get("id")
-            if sid0 is not None:
+            seen_through = set()
+
+            def mark_held_once(sid, name=""):
+                if sid is None or sid in seen_through:
+                    return
+                seen_through.add(sid)
                 get_station(
-                    sid0, s0.get("name") or edge_names.get(sid0) or str(sid0)
-                ).add_boarded(date_str, line=lk)
-                mark_used_node(sid0)
+                    sid, name or edge_names.get(sid) or str(sid)
+                ).add_through(date_str, line=lk)
+                mark_held_node(sid)
+                mark_line_role(sid, lk, "through")
+
+            if sid0 is not None:
+                name0 = s0.get("name") or edge_names.get(sid0) or str(sid0)
+                if dubi_start:
+                    mark_held_once(sid0, name0)
+                else:
+                    get_station(sid0, name0).add_boarded(date_str, line=lk)
+                    mark_used_node(sid0)
+                    mark_line_role(sid0, lk, "boarded")
                 if lk:
                     _get_dated(station_line, (sid0, lk)).add(date_str)
             if len(segment) == 1:
                 if sid0 is not None:
-                    get_station(sid0).add_alighted(date_str, line=lk)
+                    if dubi_ende:
+                        name0 = s0.get("name") or edge_names.get(sid0) or str(sid0)
+                        mark_held_once(sid0, name0)
+                    else:
+                        get_station(sid0).add_alighted(date_str, line=lk)
+                        mark_line_role(sid0, lk, "alighted")
+                        if dubi_start:
+                            mark_used_node(sid0)
             else:
                 sn = segment[-1]
                 sidn = sn.get("id")
                 if sidn is not None:
-                    get_station(
-                        sidn, sn.get("name") or edge_names.get(sidn) or str(sidn)
-                    ).add_alighted(date_str, line=lk)
-                    if sidn != sid0:
-                        mark_used_node(sidn)
+                    namen = sn.get("name") or edge_names.get(sidn) or str(sidn)
+                    if dubi_ende:
+                        mark_held_once(sidn, namen)
+                    else:
+                        get_station(sidn, namen).add_alighted(date_str, line=lk)
+                        mark_line_role(sidn, lk, "alighted")
+                        if sidn != sid0 or dubi_start:
+                            mark_used_node(sidn)
                     if lk:
                         _get_dated(station_line, (sidn, lk)).add(date_str)
-                seen_through = set()
                 for s in segment[1:-1]:
+                    if s.get("cancelled"):
+                        continue
                     sid = s.get("id")
                     if sid is None or sid in seen_through:
                         continue
-                    seen_through.add(sid)
-                    get_station(
+                    mark_held_once(
                         sid, s.get("name") or edge_names.get(sid) or str(sid)
-                    ).add_through(date_str, line=lk)
+                    )
                     if lk:
                         _get_dated(station_line, (sid, lk)).add(date_str)
         # gerichtete Kanten zwischen aufeinanderfolgenden *nicht* cancelled Halten:
         # ausgefallene Zwischenhalte überspringen (A→B✕→C wird zu A→C).
-        # Jede Fahrtrichtung zählt in ihre eigene Kante (from->to als Schlüssel).
+        # Via-Patches splitten grobe A→B in topologische Teilstücke.
         edge_segment = [s for s in segment if not s.get("cancelled")]
-        for a, b in zip(edge_segment, edge_segment[1:]):
+        expanded = expand_edge_stopovers(
+            edge_segment, status.get("id"), edge_patches, stations
+        )
+        # Check-in dieser Fahrt (unpatcht + Via-Teilstücke): gilt nicht als entdeckt.
+        trip_covered = {
+            (a_id, b_id)
+            for a_id, b_id, _, _ in consecutive_station_pairs(segment)
+        }
+        seen_pass = set()
+        for s in expanded:
+            if not s.get("physicalThrough"):
+                continue
+            sid = s.get("id")
+            if sid is None or sid in seen_pass:
+                continue
+            seen_pass.add(sid)
+            touch_visit(sid, s.get("name"))
+            get_station(
+                sid, s.get("name") or edge_names.get(sid) or str(sid)
+            ).add_pass(date_str, line=lk)
+            mark_pass_node(sid)
+            mark_line_role(sid, lk, "passed")
+            if lk:
+                _get_dated(station_line, (sid, lk)).add(date_str)
+        prev_edge = None
+        for a, b in zip(expanded, expanded[1:]):
             a_id, b_id = a.get("id"), b.get("id")
             if a_id is None or b_id is None or a_id == b_id:
                 continue
+            if lk and prev_edge is not None and prev_edge[1] == a_id:
+                line_seq[(lk, prev_edge[0], a_id, b_id)] += 1
+            prev_edge = (a_id, b_id)
             edge_counter[(a_id, b_id)] += 1
             edge_lc[(a_id, b_id, *variant)] += 1
+            trip_covered.add((a_id, b_id))
             for vk in veh_keys:
                 edge_veh[(a_id, b_id, vk, *variant)] += 1
             a_name = a.get("name") or edge_names.get(a_id) or str(a_id)
             b_name = b.get("name") or edge_names.get(b_id) or str(b_id)
             get_edge(a_id, b_id, a_name, b_name).add(
-                date_str, line=lk, loc_class=loc_class, vehicles=veh_numbers
+                date_str, line=lk, loc_class=loc_class, vehicles=veh_ids
             )
             if lk:
                 _get_dated(line_edge, (lk, a_id, b_id)).add(date_str)
@@ -831,11 +1215,26 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 _get_dated(loc_edge, (loc_class, a_id, b_id)).add(date_str)
                 if lk:
                     _get_dated(loc_edge_line, (loc_class, a_id, b_id, lk)).add(date_str)
-            for num in veh_numbers:
-                ve = _get_dated(veh_edge, (num, a_id, b_id))
+            for loc, num in veh_ids:
+                ve = _get_dated(veh_edge, (loc, num, a_id, b_id))
                 ve.add(date_str, line=lk)
                 if lk:
-                    _get_dated(veh_edge_line, (num, a_id, b_id, lk)).add(date_str)
+                    _get_dated(veh_edge_line, (loc, num, a_id, b_id, lk)).add(date_str)
+
+        # Entdeckte Kanten: Folgepaare der vollen Trip-Stopovers außerhalb
+        # des Check-ins dieser Fahrt. Andere Fahrten (andere Linie/Datum/…)
+        # schließen sie nicht aus – das macht der Kartenfilter clientseitig.
+        full_stopovers = (status.get("trip") or {}).get("stopovers") or []
+        for a_id, b_id, a_name, b_name in consecutive_station_pairs(full_stopovers):
+            if (a_id, b_id) in trip_covered:
+                continue
+            if a_name:
+                edge_names[a_id] = a_name
+            if b_name:
+                edge_names[b_id] = b_name
+            discovered_candidates.append(
+                (a_id, b_id, variant, tuple(veh_keys))
+            )
 
         # Detail-Stopovers für die Tabelle
         detail = [
@@ -872,7 +1271,9 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 "arrReal": destination.get("arrivalReal")
                 or checkin.get("manualArrival")
                 or None,
-                "viaStops": max(0, len(segment) - 2),
+                "viaStops": sum(
+                    1 for s in segment[1:-1] if not s.get("cancelled")
+                ),
                 "distanceKm": round(distance / 1000, 1),
                 "durationMin": duration,
                 "delay": delay_minutes(
@@ -930,7 +1331,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 weekday=weekday,
                 month=month,
                 loc_class=loc_class,
-                vehicles=veh_numbers,
+                vehicles=veh_ids,
             )
             _bump_cross(cross_stores["crossLineMonth"], lk, month, distance_km)
             _bump_cross(cross_stores["crossLineWeekday"], lk, wd_key, distance_km)
@@ -953,7 +1354,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 weekday=weekday,
                 month=month,
                 line=lk,
-                vehicles=veh_numbers,
+                vehicles=veh_ids,
             )
             _bump_cross(
                 cross_stores["crossLocClassLine"], loc_class, lk, distance_km
@@ -976,8 +1377,8 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
             if lk:
                 _get_dated(line_loc, (lk, loc_class)).add(date_str)
 
-        for num in veh_numbers:
-            get_agg(veh_aggs, num).add(
+        for loc, num in veh_ids:
+            get_agg(veh_aggs, (loc, num)).add(
                 distance_km=distance_km,
                 duration_min=duration,
                 points=points,
@@ -988,17 +1389,17 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 weekday=weekday,
                 month=month,
                 line=lk,
-                loc_class=loc_class,
+            )
+            label = vehicle_cross_key(loc, num)
+            _bump_cross(
+                cross_stores["crossVehicleLine"], label, lk, distance_km
             )
             _bump_cross(
-                cross_stores["crossVehicleLine"], num, lk, distance_km
-            )
-            _bump_cross(
-                cross_stores["crossVehicleMonth"], num, month, distance_km
+                cross_stores["crossVehicleMonth"], label, month, distance_km
             )
             if lk:
-                _get_dated(line_vehicle, (lk, num)).add(date_str)
-            _get_dated(vehicle_loc, (num, loc_class or "")).add(date_str)
+                _get_dated(line_vehicle, (lk, loc, num)).add(date_str)
+            _get_dated(vehicle_loc, (num, loc)).add(date_str)
 
         # Fahrzeug-Datensätze aus den Träwelling-Tags (sofern vorhanden).
         # loc_class und veh_numbers sind oben schon ermittelt.
@@ -1019,9 +1420,16 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                     "distanceKm": round(distance / 1000, 1),
                     "durationMin": duration,
                     "points": points,
-                    "segments": max(0, len(segment) - 1),
+                    "segments": max(0, len(expanded) - 1),
                 }
             )
+
+    discovered_lc = Counter()      # (id_from, id_to, *variant) -> Sichtungen
+    discovered_veh = Counter()     # (id_from, id_to, veh_key, *variant) -> Sichtungen
+    for a_id, b_id, variant, vks in discovered_candidates:
+        discovered_lc[(a_id, b_id, *variant)] += 1
+        for vk in vks:
+            discovered_veh[(a_id, b_id, vk, *variant)] += 1
 
     # Segment-Rangliste für die Übersicht: global über alle Fahrten, ungefiltert.
     segment_ranking = []
@@ -1078,7 +1486,12 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         if c is None:
             continue
         map_stations[str(sid)] = c
-        map_nodes.append([sid, variant_id(key[1:]), cnt, node_lc_used.get(key, 0)])
+        map_nodes.append([
+            sid, variant_id(key[1:]), cnt,
+            node_lc_used.get(key, 0),
+            node_lc_held.get(key, 0),
+            node_lc_pass.get(key, 0),
+        ])
 
     # Fahrzeug-Liste + Kanten/Knoten mit Fahrzeug-Index (für Karten-Filter).
     map_vehicles = []  # [locClass, number]
@@ -1104,6 +1517,28 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
             [a_id, b_id, variant_id(key[3:]), vehicle_id(vk), count]
         )
 
+    map_disc_edges = []
+    for key, count in discovered_lc.items():
+        a_id, b_id = key[0], key[1]
+        ca, cb = station_coord(a_id), station_coord(b_id)
+        if ca is None or cb is None:
+            continue
+        map_stations[str(a_id)] = ca
+        map_stations[str(b_id)] = cb
+        map_disc_edges.append([a_id, b_id, variant_id(key[2:]), count])
+
+    map_disc_veh_edges = []
+    for key, count in discovered_veh.items():
+        a_id, b_id, vk = key[0], key[1], key[2]
+        ca, cb = station_coord(a_id), station_coord(b_id)
+        if ca is None or cb is None:
+            continue
+        map_stations[str(a_id)] = ca
+        map_stations[str(b_id)] = cb
+        map_disc_veh_edges.append(
+            [a_id, b_id, variant_id(key[3:]), vehicle_id(vk), count]
+        )
+
     map_veh_nodes = []
     for key, cnt in node_veh.items():
         sid, vk = key[0], key[1]
@@ -1112,7 +1547,12 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
             continue
         map_stations[str(sid)] = c
         map_veh_nodes.append(
-            [sid, variant_id(key[2:]), vehicle_id(vk), cnt, node_veh_used.get(key, 0)]
+            [
+                sid, variant_id(key[2:]), vehicle_id(vk), cnt,
+                node_veh_used.get(key, 0),
+                node_veh_held.get(key, 0),
+                node_veh_pass.get(key, 0),
+            ]
         )
 
     dates.sort()
@@ -1172,11 +1612,15 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
 
     by_station = [a.to_row() for a in station_aggs.values()]
     by_station.sort(
-        key=lambda r: (-r["total"], -r["boarded"], -r["alighted"], -r["through"], r["key"])
+        key=lambda r: (
+            -r["total"], -r["boarded"], -r["alighted"], -r["through"],
+            -r["passed"], r["key"],
+        )
     )
     stations_boarded_n = sum(1 for a in station_aggs.values() if a.boarded)
     stations_alighted_n = sum(1 for a in station_aggs.values() if a.alighted)
     stations_through_n = sum(1 for a in station_aggs.values() if a.through)
+    stations_passed_n = sum(1 for a in station_aggs.values() if a.passed)
 
     # --- Kanten- und Wiederholungs-Statistiken ---
     def edge_names_for(a_id, b_id):
@@ -1224,12 +1668,13 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         return (-r["count"], r.get("last") or "", r.get("from") or "")
 
     veh_edge_gt1_all = []
-    for (num, a_id, b_id), c in veh_edge.items():
+    for (loc, num, a_id, b_id), c in veh_edge.items():
         if c.count <= 1:
             continue
         fn, tn = edge_names_for(a_id, b_id)
         veh_edge_gt1_all.append({
             "vehicle": num,
+            "locClass": loc,
             "from": fn,
             "to": tn,
             "count": c.count,
@@ -1242,12 +1687,13 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
     veh_edge_gt1 = veh_edge_gt1_all
 
     veh_edge_line_gt1 = []
-    for (num, a_id, b_id, line), c in veh_edge_line.items():
+    for (loc, num, a_id, b_id, line), c in veh_edge_line.items():
         if c.count <= 1:
             continue
         fn, tn = edge_names_for(a_id, b_id)
         veh_edge_line_gt1.append({
             "vehicle": num,
+            "locClass": loc,
             "from": fn,
             "to": tn,
             "line": line,
@@ -1294,13 +1740,32 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
 
     edges_repeat_n = sum(1 for r in all_edge_rows if r["count"] > 1)
 
-    # Katalogseite „Linien“: alle Kanten je Linie + Baureihen-Anteile (Fahrten).
-    line_edges_map = {}
+    # Katalogseite „Linien“: aggregierte gerichtete Laufwege + Baureihen-Anteile.
+    def station_label(sid):
+        st = station_aggs.get(sid)
+        if st and st.name:
+            return st.name
+        return edge_names.get(sid) or str(sid)
+
+    def route_stop_flags(sid, lk):
+        st = station_aggs.get(sid)
+        flags = 0
+        if st and (st.boarded or st.alighted):
+            flags |= ROUTE_FLAG_USED
+        role = line_station_role.get((sid, lk))
+        if role:
+            if role.boarded or role.alighted:
+                flags |= ROUTE_FLAG_USED_LINE
+            if role.passed and not (role.boarded or role.alighted or role.through):
+                flags |= ROUTE_FLAG_PASS_ONLY
+        return flags
+
+    line_edge_ids = {}
     for (line, a_id, b_id), c in line_edge.items():
-        fn, tn = edge_names_for(a_id, b_id)
-        line_edges_map.setdefault(line, []).append([fn, tn, c.count])
-    for edges in line_edges_map.values():
-        edges.sort(key=lambda e: (-e[2], e[0], e[1]))
+        line_edge_ids.setdefault(line, {})[(a_id, b_id)] = c.count
+    line_seq_ids = {}
+    for (line, a_id, b_id, c_id), n in line_seq.items():
+        line_seq_ids.setdefault(line, {})[(a_id, b_id, c_id)] = n
 
     line_catalog = []
     for lk, agg in line_aggs.items():
@@ -1312,13 +1777,28 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         loc_classes = [[k, n] for k, n in agg.loc_class_counts.most_common()]
         if untagged:
             loc_classes.append(["", untagged])
+        packed_routes = []
+        for route in cover_directed_paths(
+            line_edge_ids.get(lk, {}),
+            station_label,
+            line_seq_ids.get(lk, {}),
+        ):
+            stops = [
+                [sid, station_label(sid), route_stop_flags(sid, lk)]
+                for sid in route["ids"]
+            ]
+            packed_routes.append({
+                "loop": route["loop"],
+                "stops": stops,
+                "counts": route["counts"],
+            })
         line_catalog.append({
             "key": lk,
             "operator": operator,
             "count": agg.count,
             "distanceKm": round(agg.distance_km, 1),
             "locClasses": loc_classes,
-            "edges": line_edges_map.get(lk, []),
+            "routes": packed_routes,
         })
     op_km = {}
     for row in line_catalog:
@@ -1349,6 +1829,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
             "stationsBoarded": stations_boarded_n,
             "stationsAlighted": stations_alighted_n,
             "stationsThrough": stations_through_n,
+            "stationsPassed": stations_passed_n,
             "minTrip": min_trip,
             "maxTrip": max_trip,
             "topLine": (
@@ -1357,7 +1838,11 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 else None
             ),
             "topVehicle": (
-                {"key": top_veh["key"], "km": top_veh["distanceKm"]}
+                {
+                    "key": top_veh["key"],
+                    "locClass": top_veh.get("locClass") or "",
+                    "km": top_veh["distanceKm"],
+                }
                 if top_veh
                 else None
             ),
@@ -1432,11 +1917,16 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
             _emit_dated(
                 a.dates_through, a.first_through, "stationsThrough", {"key": name}
             )
+        if a.first_pass:
+            _emit_dated(
+                a.dates_pass, a.first_pass, "stationsPassed", {"key": name}
+            )
 
-    for (line, veh), c in line_vehicle.items():
+    for (line, loc, veh), c in line_vehicle.items():
         if c.first:
             _emit_dated(
-                c.dates, c.first, "lineVehicle", {"line": line, "vehicle": veh}
+                c.dates, c.first, "lineVehicle",
+                {"line": line, "vehicle": veh, "locClass": loc},
             )
     for (line, loc), c in line_loc.items():
         if c.first:
@@ -1444,13 +1934,13 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
                 c.dates, c.first, "lineLocClass", {"line": line, "locClass": loc}
             )
 
-    for (num, a_id, b_id), c in veh_edge.items():
+    for (loc, num, a_id, b_id), c in veh_edge.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
         _emit_dated(
             c.dates, c.first, "vehEdge",
-            {"vehicle": num, "from": fn, "to": tn},
+            {"vehicle": num, "locClass": loc, "from": fn, "to": tn},
         )
     for (line, a_id, b_id), c in line_edge.items():
         if not c.first:
@@ -1478,13 +1968,13 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
             c.dates, c.first, "stationLine", {"station": name, "line": line}
         )
 
-    for (num, a_id, b_id, line), c in veh_edge_line.items():
+    for (loc, num, a_id, b_id, line), c in veh_edge_line.items():
         if not c.first:
             continue
         fn, tn = edge_names_for(a_id, b_id)
         _emit_dated(
             c.dates, c.first, "vehEdgeLine",
-            {"vehicle": num, "from": fn, "to": tn, "line": line},
+            {"vehicle": num, "locClass": loc, "from": fn, "to": tn, "line": line},
         )
     for (loc, a_id, b_id, line), c in loc_edge_line.items():
         if not c.first:
@@ -1566,6 +2056,8 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None):
         "mapVehicles": map_vehicles,
         "vehEdges": map_veh_edges,
         "vehNodes": map_veh_nodes,
+        "discoveredEdges": map_disc_edges,
+        "discoveredVehEdges": map_disc_veh_edges,
         "segments": segment_ranking,
         "stats": stats,
         "dailyFirsts": daily_firsts,
@@ -1613,7 +2105,8 @@ def render_html(data):
     """Baut das selbstständige Dashboard-HTML aus dashboard/-Assets + Daten.
 
     CSS und JS werden inline eingesetzt (ein <style>, ein <script>), damit die
-    Ausgabe eine einzelne Datei bleibt. __DATA__ wird zuletzt ersetzt, damit
+    Ausgabe eine einzelne Datei bleibt. `builtAt` (ISO-Lokalzeit des Builds)
+    wird in die Daten geschrieben. __DATA__ wird zuletzt ersetzt, damit
     Asset-Inhalte den JSON-Blob nicht zerlegen können.
     """
     template = _read_asset("template.html")
@@ -1624,7 +2117,9 @@ def render_html(data):
     css = _read_asset("style.css")
     js = "".join(_read_asset(rel) for rel in _JS_FILES)
     html = template.replace("__CSS__", css).replace("__JS__", js)
-    return html.replace("__DATA__", json_for_script(data))
+    payload = dict(data)
+    payload["builtAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    return html.replace("__DATA__", json_for_script(payload))
 
 
 def main(argv=None):
@@ -1649,6 +2144,21 @@ def main(argv=None):
         help="Baureihe→Familie für den Kartenfilter "
              "(Default: loc_class_families.txt; JSON-Objekt, "
              "gleiche Baureihe darf mehrfach vorkommen).",
+    )
+    parser.add_argument(
+        "--edge-patches", default="data/edge_patches.json",
+        help="Lokale Via-Patches für grobe Kanten "
+             "(Default: data/edge_patches.json; fehlende Datei = keine Expansion).",
+    )
+    parser.add_argument(
+        "--station-patches", default="data/station_patches.json",
+        help="Lokale Stations-Patches (Koordinaten/Merges) "
+             "(Default: data/station_patches.json; fehlende Datei = keine Änderung).",
+    )
+    parser.add_argument(
+        "--line-color-patches", default="data/line_color_patches.json",
+        help="Lokale Linienfarben-Patches je Status "
+             "(Default: data/line_color_patches.json; fehlende Datei = keine Änderung).",
     )
     args = parser.parse_args(argv)
 
@@ -1690,10 +2200,39 @@ def main(argv=None):
     elif os.path.isfile(args.loc_class_families):
         log(f"Baureihenfamilien: {args.loc_class_families} enthält keine Regeln.")
 
+    edge_patches = load_patches(args.edge_patches)
+    n_patch = (
+        len(edge_patches.get("defaults") or {})
+        + len(edge_patches.get("overrides") or {})
+    )
+    if n_patch:
+        log(f"Kanten-Patches: {n_patch} Einträge aus {args.edge_patches}.")
+    elif os.path.isfile(args.edge_patches):
+        log(f"Kanten-Patches: {args.edge_patches} ist leer.")
+
+    station_patches = load_station_patches(args.station_patches)
+    n_move = len(station_patches.get("moves") or {})
+    n_merge = len(station_patches.get("merges") or {})
+    if n_move or n_merge:
+        log(f"Stations-Patches: {n_move} Verschiebungen, {n_merge} Merges "
+            f"aus {args.station_patches}.")
+    elif os.path.isfile(args.station_patches):
+        log(f"Stations-Patches: {args.station_patches} ist leer.")
+
+    line_color_patches = load_line_color_patches(args.line_color_patches)
+    n_color = len(line_color_patches.get("overrides") or {})
+    if n_color:
+        log(f"Linienfarben-Patches: {n_color} Einträge aus {args.line_color_patches}.")
+    elif os.path.isfile(args.line_color_patches):
+        log(f"Linienfarben-Patches: {args.line_color_patches} ist leer.")
+
     data = build_data(
         statuses, stations,
         ignore_plus=args.ignore_plus,
         loc_class_families=loc_class_families,
+        edge_patches=edge_patches,
+        station_patches=station_patches,
+        line_color_patches=line_color_patches,
     )
     log(f"Ausgewertet: {data['kpis']['count']} Fahrten, {len(data['edges'])} Karten-Kanten, "
         f"{len(data['segments'])} Segmente.")

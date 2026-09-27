@@ -9,10 +9,15 @@
   const delayEl=document.getElementById("tripShowDelay");
   const routeEl=document.getElementById("tripShowRoute");
   const timeEl=document.getElementById("tripTimeMode");
-  let rows=DATA.trips.map((t,i)=>({...t,_i:i}));
-  const kpis=DATA.kpis||{};
-  bindDateInput(dateFromEl, kpis.first, kpis.last);
-  bindDateInput(dateToEl, kpis.first, kpis.last);
+  let rows=[];
+  function syncTrips(){
+    rows=(D().trips||[]).map((t,i)=>({...t,_i:i}));
+    const kpis=D().kpis||{};
+    bindDateInput(dateFromEl, kpis.first, kpis.last);
+    bindDateInput(dateToEl, kpis.first, kpis.last);
+    routeCacheKey="";
+    routeByI=new Map();
+  }
   let sortKey="date", sortAsc=false;
   let visible=[];
   let routeCacheKey="";
@@ -126,7 +131,9 @@
   }
 
   function copyTsv(){
-    copyText(tripsTsv(visible, {route:showRoute(), delay:showDelay(), timeMode:timeMode()}), copyBtn);
+    let text=tripsTsv(visible, {route:showRoute(), delay:showDelay(), timeMode:timeMode()});
+    if(homeActive()) text="Fahrten · Eingestellte Filter: Heimatregion\n"+text;
+    copyText(text, copyBtn);
   }
 
   tbody.addEventListener("click",e=>{
@@ -134,7 +141,7 @@
     const next=tr.nextElementSibling;
     if(next && next.classList.contains("detail")){ next.remove(); return; }
     document.querySelectorAll("tr.detail").forEach(d=>d.remove());
-    const t=DATA.trips[+tr.dataset.i];
+    const t=rows[+tr.dataset.i];
     const dr=document.createElement("tr"); dr.className="detail";
     dr.innerHTML=detailHtml(t); tr.after(dr);
   });
@@ -156,6 +163,8 @@
     el.onchange=render;
     el.oninput=render;
   });
+  syncTrips();
   render();
+  onHomeChange(()=>{ syncTrips(); render(); });
 })();
 

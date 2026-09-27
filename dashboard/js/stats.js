@@ -1,13 +1,7 @@
 // ---------- Statistiken (Linie / Baureihe / Fahrzeug / Station) ----------
 (function(){
-  const S=DATA.stats;
-  if(!S){
-    document.getElementById("stats-extra").innerHTML=
-      "<p class='hint'>Keine Statistik-Daten vorhanden.</p>";
-    return;
-  }
   const WD=["Mo","Di","Mi","Do","Fr","Sa","So"];
-  const LC=DATA.lineColors||{};
+  function lineColors(){ return D().lineColors||{}; }
   const turbo=(t)=>{
     t=Math.max(0,Math.min(1,t));
     const stops=[[0.0,[48,18,59]],[0.1,[68,57,144]],[0.2,[65,117,199]],
@@ -23,7 +17,7 @@
   };
   function lineBadge(key){
     const name=lineName(key);
-    const c=LC[key];
+    const c=lineColors()[key];
     const st=c?` style="background:${c[0]};color:${c[1]}"`:"";
     return `<span class="line-badge"${st}>${esc(name)}</span>`;
   }
@@ -39,6 +33,26 @@
   }
 
   // KPI-Überblick
+  let applyStationSort=function(){};
+  document.querySelectorAll("[data-station-sort]").forEach(a=>{
+    a.addEventListener("click",()=>{
+      const k=a.getAttribute("data-station-sort");
+      if(k) applyStationSort(k);
+    });
+  });
+  function renderStats(){
+  const S=D().stats;
+  if(!S){
+    ["stats-extra","stats-lines","stats-loc","stats-veh","stats-stations",
+     "stats-edges","stats-repeat","stats-cross"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.innerHTML="";
+    });
+    document.getElementById("stats-extra").innerHTML=
+      "<p class='hint'>Keine Statistik-Daten vorhanden.</p>";
+    applyStationSort=function(){};
+    return;
+  }
   const ex=S.extra||{};
   const cards=[
     ["Linien", fmtNum(ex.lines)],
@@ -272,18 +286,15 @@
       });
     }
     paint();
-    document.querySelectorAll("[data-station-sort]").forEach(a=>{
-      a.addEventListener("click",()=>{
-        const k=a.getAttribute("data-station-sort");
-        if(!k) return;
-        sortKey=k; sortAsc=false;
-        if(k==="boarded") useBoarded=true;
-        if(k==="alighted") useAlighted=true;
-        if(k==="through") useThrough=true;
-        if(k==="passed") usePassed=true;
-        paint();
-      });
-    });
+    applyStationSort=function(k){
+      if(!k) return;
+      sortKey=k; sortAsc=false;
+      if(k==="boarded") useBoarded=true;
+      if(k==="alighted") useAlighted=true;
+      if(k==="through") useThrough=true;
+      if(k==="passed") usePassed=true;
+      paint();
+    };
   })();
 
   function renderComboTable(mountEl, title, hint, rows, cols, opts){
@@ -526,5 +537,8 @@
   mountHeatmap(crossEl, S.crossLineDelay, "Linie × Verspätung", lineName, id, "stats-cross-line-delay", {initialLimit:50});
   mountHeatmap(crossEl, S.crossLocClassDelay, "Baureihe × Verspätung", id, id, "stats-cross-loc-delay");
   mountHeatmap(crossEl, S.crossVehicleMonth, "Fahrzeug × Monat", vehLabel, id, "stats-cross-veh-month", {initialLimit:50});
+  }
+  renderStats();
+  onHomeChange(renderStats);
 })();
 

@@ -1,7 +1,8 @@
 // ---------- Vehicle matrix ----------
 (function(){
-  const V=DATA.vehicles||[];
-  const LC=DATA.lineColors||{};
+  let V=[];
+  let LC={};
+  let vehScoped=false;
   const container=document.getElementById("vehMatrices");
   const groupEl=document.getElementById("vehGroup");
   const opEl=document.getElementById("vehOperator");
@@ -24,15 +25,28 @@
   }
   function uniq(arr){ return [...new Set(arr)]; }
 
-  // Dropdowns aus den Datensätzen befüllen.
-  fillSelect(opEl, uniq(V.map(r=>r.operator)).sort()
-    .map(o=>({value:o,label:o||"(ohne Operator)"})));
-  fillSelect(catEl, uniq(V.map(r=>r.category)).filter(Boolean).sort()
-    .map(c=>({value:c,label:catLabel(c)})));
-  const kpis=DATA.kpis||{};
-  const vehDates=V.map(r=>(r.date||"").slice(0,10)).filter(Boolean).sort();
-  bindDateInput(dateFromEl, kpis.first||vehDates[0], kpis.last||vehDates[vehDates.length-1]);
-  bindDateInput(dateToEl, kpis.first||vehDates[0], kpis.last||vehDates[vehDates.length-1]);
+  function restoreOpt(el, value){
+    const ok=[...el.options].some(o=>o.value===value);
+    el.value=ok?value:"__all__";
+  }
+  function reloadVehicles(){
+    const src=D();
+    V=src.vehicles||[];
+    LC=src.lineColors||{};
+    const prevOp=vehScoped?opEl.value:null;
+    const prevCat=vehScoped?catEl.value:null;
+    fillSelect(opEl, uniq(V.map(r=>r.operator)).sort()
+      .map(o=>({value:o,label:o||"(ohne Operator)"})));
+    fillSelect(catEl, uniq(V.map(r=>r.category)).filter(Boolean).sort()
+      .map(c=>({value:c,label:catLabel(c)})));
+    if(prevOp!=null) restoreOpt(opEl, prevOp);
+    if(prevCat!=null) restoreOpt(catEl, prevCat);
+    const kpis=src.kpis||{};
+    const vehDates=V.map(r=>(r.date||"").slice(0,10)).filter(Boolean).sort();
+    bindDateInput(dateFromEl, kpis.first||vehDates[0], kpis.last||vehDates[vehDates.length-1]);
+    bindDateInput(dateToEl, kpis.first||vehDates[0], kpis.last||vehDates[vehDates.length-1]);
+    vehScoped=true;
+  }
 
   function cls(k){ return sortKey===k ? (sortAsc?"sorted asc":"sorted") : ""; }
 
@@ -128,6 +142,7 @@
       if(!el||el.value==="__all__") return;
       parts.push(label+" "+selectText(el));
     }
+    if(homeActive()) parts.push("Heimatregion");
     addSel(opEl,"Operator");
     addSel(catEl,"Kategorie");
     const from=dateFromEl.value, to=dateToEl.value;
@@ -318,6 +333,8 @@
       renderMatrices();
     });
   });
+  reloadVehicles();
   renderMatrices();
+  onHomeChange(()=>{ closeModal(); reloadVehicles(); renderMatrices(); });
 })();
 

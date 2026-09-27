@@ -38,18 +38,9 @@ let map=null, mapBounds=[], mapFitted=false;
   // aus DATA.variants) und nur Station-IDs; die Koordinaten liegen einmalig in ST.
   // Fahrzeug-Filter nutzt eigene Buckets (vehEdges/vehNodes), damit Mehrfachwagen
   // bei "Alle" nicht doppelt zählen.
-  const ST=DATA.stations||{};        // "id" -> [lat, lon, name]
-  const VAR=DATA.variants||[];       // [lineKey, locClass, category, operator, date]
-  const FAM=DATA.locClassFamilies||{}; // Familie -> [locClass, ...]
-  const VEH=DATA.mapVehicles||[];    // [locClass, number]
-  const rawEdges=DATA.edges||[];     // [a_id, b_id, variantIdx, count]
-  const rawNodes=DATA.nodes||[];     // [sid, variantIdx, count, usedCount, heldCount, passCount]
-  const rawVehEdges=DATA.vehEdges||[]; // [a_id, b_id, variantIdx, vehIdx, count]
-  const rawVehNodes=DATA.vehNodes||[]; // [sid, variantIdx, vehIdx, count, usedCount, heldCount, passCount]
-  const rawDisc=DATA.discoveredEdges||[]; // [a_id, b_id, variantIdx, count]
-  const rawDiscVeh=DATA.discoveredVehEdges||[]; // [a_id, b_id, variantIdx, vehIdx, count]
+  let ST={}, VAR=[], FAM={}, VEH=[];
+  let rawEdges=[], rawNodes=[], rawVehEdges=[], rawVehNodes=[], rawDisc=[], rawDiscVeh=[];
   const DISC="#64748b";
-  if(!rawEdges.length){ return; }
   const lineEl=document.getElementById("mapLine");
   const locEl=document.getElementById("mapLoc");
   const vehEl=document.getElementById("mapVehicle");
@@ -60,9 +51,6 @@ let map=null, mapBounds=[], mapFitted=false;
   const dateToEl=document.getElementById("mapDateTo");
   const discEl=document.getElementById("mapDiscovered");
   const countEl=document.getElementById("mapCount");
-  const kpis=DATA.kpis||{};
-  bindDateInput(dateFromEl, kpis.first, kpis.last);
-  bindDateInput(dateToEl, kpis.first, kpis.last);
 
   // Farbskala nach Häufigkeit, Turbo-Spektrum Blau -> Rot.
   function color(t){ // t in [0,1]
@@ -148,12 +136,50 @@ let map=null, mapBounds=[], mapFitted=false;
     if(hasEmpty) html+='<option value="__none__">(ohne Linie)</option>';
     lineEl.innerHTML=html;
   }
-  fillLineSelect();
-  fillLocSelect();
-  fillVehicleSelect();
-  fillSelect(catEl, VAR.map(v=>v[2]), "(ohne Kategorie)", catLabel);
-  fillSelect(opEl, VAR.map(v=>v[3]), "(ohne Operator)");
-  fillSelect(yearEl, VAR.map(v=>(v[4]||"").slice(0,4)), "(ohne Jahr)", null, true);
+  function restoreSelect(el, value){
+    if(!el) return;
+    const ok=value && [...el.options].some(o=>o.value===value);
+    el.value=ok?value:"__all__";
+  }
+  function restoreVehicle(value, label){
+    if(!value || value==="__all__"){ vehEl.value="__all__"; return; }
+    if(value==="__none__"){ restoreSelect(vehEl, value); return; }
+    const opt=[...vehEl.options].find(o=>o.textContent===label && o.value!=="__all__" && o.value!=="__none__");
+    vehEl.value=opt?opt.value:"__all__";
+  }
+  function applyScope(){
+    const src=D();
+    ST=src.stations||{};
+    VAR=src.variants||[];
+    FAM=src.locClassFamilies||{};
+    VEH=src.mapVehicles||[];
+    rawEdges=src.edges||[];
+    rawNodes=src.nodes||[];
+    rawVehEdges=src.vehEdges||[];
+    rawVehNodes=src.vehNodes||[];
+    rawDisc=src.discoveredEdges||[];
+    rawDiscVeh=src.discoveredVehEdges||[];
+    const keep={
+      line:lineEl.value, loc:locEl.value, cat:catEl.value, op:opEl.value, year:yearEl.value,
+      veh:vehEl.value,
+      vehLabel:(vehEl.selectedOptions&&vehEl.selectedOptions[0])?vehEl.selectedOptions[0].textContent:"",
+    };
+    fillLineSelect();
+    fillLocSelect();
+    fillVehicleSelect();
+    fillSelect(catEl, VAR.map(v=>v[2]), "(ohne Kategorie)", catLabel);
+    fillSelect(opEl, VAR.map(v=>v[3]), "(ohne Operator)");
+    fillSelect(yearEl, VAR.map(v=>(v[4]||"").slice(0,4)), "(ohne Jahr)", null, true);
+    restoreSelect(lineEl, keep.line);
+    restoreSelect(locEl, keep.loc);
+    restoreSelect(catEl, keep.cat);
+    restoreSelect(opEl, keep.op);
+    restoreSelect(yearEl, keep.year);
+    restoreVehicle(keep.veh, keep.vehLabel);
+    const kpis=src.kpis||{};
+    bindDateInput(dateFromEl, kpis.first, kpis.last);
+    bindDateInput(dateToEl, kpis.first, kpis.last);
+  }
 
   // Einzelnen Select-Wert gegen ein Attribut prüfen (__all__/__none__/Wert).
   function sel(val, actual){
@@ -393,7 +419,9 @@ let map=null, mapBounds=[], mapFitted=false;
       ? vEdges.length+" Segmente · "+vDiscEdges.length+" entdeckt"
       : vEdges.length+" Segmente";
   }
+  applyScope();
   drawAll();
+  onHomeChange(()=>{ applyScope(); drawAll(); });
   map.on("zoomend", draw);
   [lineEl,locEl,vehEl,catEl,opEl,yearEl,dateFromEl,dateToEl,discEl].forEach(el=>{
     if(!el) return;

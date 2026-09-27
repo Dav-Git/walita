@@ -133,6 +133,16 @@ def main(argv=None):
         help="Lokale Linienfarben-Patches je Status "
              "(Default: data/line_color_patches.json; fehlende Datei = keine Änderung).",
     )
+    dash.add_argument(
+        "--home-region", default="data/home_region.json",
+        help="Lokale Operator-Liste der Heimatregion "
+             "(Default: data/home_region.json; fehlende oder leere Datei = kein Filter).",
+    )
+    dash.add_argument(
+        "--boarding-patches", default="data/boarding_patches.json",
+        help="Lokale Einstiegs-Patches je Status "
+             "(Default: data/boarding_patches.json; fehlende Datei = keine Änderung).",
+    )
 
     mode = parser.add_argument_group("Modus")
     # Beide Modi überspringen den Export – gemeinsam angegeben wäre unklar, welcher gilt.
@@ -207,6 +217,8 @@ def main(argv=None):
         edit_argv.extend(["--edge-patches", args.edge_patches])
         edit_argv.extend(["--station-patches", args.station_patches])
         edit_argv.extend(["--line-color-patches", args.line_color_patches])
+        edit_argv.extend(["--home-region", args.home_region])
+        edit_argv.extend(["--boarding-patches", args.boarding_patches])
         return status_editor.main(edit_argv)
 
     if args.demo:
@@ -223,6 +235,8 @@ def main(argv=None):
         dash_argv.extend(["--edge-patches", args.edge_patches])
         dash_argv.extend(["--station-patches", args.station_patches])
         dash_argv.extend(["--line-color-patches", args.line_color_patches])
+        dash_argv.extend(["--home-region", args.home_region])
+        dash_argv.extend(["--boarding-patches", args.boarding_patches])
         return build_dashboard.main(dash_argv)
 
     if not args.dashboard_only:
@@ -265,6 +279,8 @@ def main(argv=None):
     dash_argv.extend(["--edge-patches", args.edge_patches])
     dash_argv.extend(["--station-patches", args.station_patches])
     dash_argv.extend(["--line-color-patches", args.line_color_patches])
+    dash_argv.extend(["--home-region", args.home_region])
+    dash_argv.extend(["--boarding-patches", args.boarding_patches])
     return build_dashboard.main(dash_argv)
 
 

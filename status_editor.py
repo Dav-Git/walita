@@ -5,7 +5,7 @@
 
 Die Fahrtliste zeigt Baureihe und Fahrzeugnummer direkt; Zellen werden lokal
 gestagt. Speichern schreibt den Diff live auf den Server. Laufweg/`trip`
-bleibt unangetastet. Die Linienfarbe ist ein lokales Overlay (kein API-Write).
+bleibt unangetastet. Linienfarbe, Einstieg und Heimatregion sind lokale Overlays (kein API-Write).
 
 Auth wie der Export, aber mit Scope `write-statuses` zusätzlich zu
 `read-statuses`.
@@ -28,9 +28,11 @@ from tkinter import messagebox, ttk
 import urllib.parse
 
 import auth
+import boarding_patches as bp
 import build_dashboard
 import download_statuses as dl
 import edge_patches as ep
+import home_region as hr
 import line_color_patches as lcp
 import station_patches as sp
 from version import __version__
@@ -162,6 +164,16 @@ def _fmt_when(ts):
     if not isinstance(ts, str) or len(ts) < 16:
         return ts or "—"
     return ts[:10] + " " + ts[11:16]
+
+
+def _boarding_label(stop, api_so):
+    """Eine Zeile im Einstiegs-Dialog: Zeit, Name, Markierung des API-Halts."""
+    dep = stop.get("departureReal") or stop.get("departurePlanned") or ""
+    name = _station_name(stop)
+    mark = ""
+    if bp.stopover_id(stop.get("stopoverId")) == api_so:
+        mark = "  (Träwelling)"
+    return f"{_fmt_when(dep)}  {name}{mark}"
 
 
 def _trip_short(status):
@@ -615,13 +627,194 @@ class LineColorDialog(tk.Toplevel):
         self.destroy()
 
 
+class HomeRegionDialog(tk.Toplevel):
+    """Checkbox-Liste aller Operatoren. result = Namensliste oder None."""
+
+    def __init__(self, master, names, selected):
+        super().__init__(master)
+        self.title("Heimatregion")
+        self.transient(master)
+        self.result = None
+        self.minsize(420, 480)
+        selected = set(selected or [])
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(
+            frm,
+            text="Angehakte Operatoren gehören zur Heimatregion. "
+                 "Leere Liste schaltet den Filter aus.",
+            wraplength=400,
+        ).pack(anchor="w")
+
+        self.search_var = tk.StringVar()
+        search = ttk.Entry(frm, textvariable=self.search_var)
+        search.pack(fill="x", pady=(8, 6))
+        _on_search = lambda *_: self._apply_search()
+        if hasattr(self.search_var, "trace_add"):
+            self.search_var.trace_add("write", _on_search)
+        else:
+            self.search_var.trace("w", _on_search)
+
+        wrap = ttk.Frame(frm)
+        wrap.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(wrap, highlightthickness=0, width=400, height=320)
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas)
+        self.inner.bind(
+            "<Configure>",
+            lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
+        )
+        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=scroll.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+
+        self.vars = {}
+        self._rows = []
+        for name in names:
+            var = tk.BooleanVar(value=name in selected)
+            self.vars[name] = var
+            label = "(ohne Operator)" if name == "" else name
+            row = ttk.Checkbutton(self.inner, text=label, variable=var)
+            row.pack(anchor="w", fill="x")
+            self._rows.append((name, label, row))
+
+        quick = ttk.Frame(frm)
+        quick.pack(fill="x", pady=(8, 0))
+        ttk.Button(quick, text="Alle", command=lambda: self._set_visible(True)).pack(
+            side="left"
+        )
+        ttk.Button(quick, text="Keine", command=lambda: self._set_visible(False)).pack(
+            side="left", padx=6
+        )
+        ttk.Label(quick, text="Alle/Keine gilt für die sichtbare Suche.").pack(
+            side="left", padx=(8, 0)
+        )
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Abbrechen", command=self._cancel).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text="Speichern", command=self._ok).pack(side="right")
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+        search.focus_set()
+
+    def _on_wheel(self, event):
+        delta = getattr(event, "delta", 0)
+        if not delta:
+            return
+        step = int(-delta / 120) or (-1 if delta > 0 else 1)
+        self.canvas.yview_scroll(step, "units")
+
+    def _apply_search(self):
+        query = self.search_var.get().casefold().strip()
+        for _name, label, row in self._rows:
+            if not query or query in label.casefold():
+                row.pack(anchor="w", fill="x")
+            else:
+                row.pack_forget()
+
+    def _set_visible(self, checked):
+        for name, _label, row in self._rows:
+            if row.winfo_manager():
+                self.vars[name].set(checked)
+
+    def _ok(self):
+        self.result = [name for name, var in self.vars.items() if var.get()]
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class BoardingDialog(tk.Toplevel):
+    """Halt vor dem Ausstieg wählen. result = stopoverId oder None."""
+
+    def __init__(self, master, status, selected_so):
+        super().__init__(master)
+        self.title("Einstieg")
+        self.transient(master)
+        self.result = None
+        self.minsize(420, 360)
+        candidates = bp.candidate_stopovers(status)
+        api_so = bp.stopover_id(
+            ((status.get("checkin") or {}).get("origin") or {}).get("stopoverId")
+        )
+        self._ids = []
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(
+            frm,
+            text="Neuer Einstieg auf dieser Fahrt, vor dem Ausstieg. "
+                 "Nur lokal, kein Upload.",
+            wraplength=400,
+        ).pack(anchor="w")
+
+        wrap = ttk.Frame(frm)
+        wrap.pack(fill="both", expand=True, pady=(8, 0))
+        self.list = tk.Listbox(wrap, height=12, activestyle="dotbox")
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.list.yview)
+        self.list.configure(yscrollcommand=scroll.set)
+        self.list.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        select_at = 0
+        wanted = bp.stopover_id(selected_so)
+        for i, stop in enumerate(candidates):
+            so = bp.stopover_id(stop.get("stopoverId"))
+            self._ids.append(so)
+            self.list.insert("end", _boarding_label(stop, api_so))
+            if so == wanted:
+                select_at = i
+        if self._ids:
+            self.list.selection_set(select_at)
+            self.list.activate(select_at)
+            self.list.see(select_at)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Abbrechen", command=self._cancel).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
+
+        self.list.bind("<Double-1>", lambda _e: self._ok())
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+        self.list.focus_set()
+        self.wait_window(self)
+
+    def _ok(self):
+        sel = self.list.curselection()
+        if not sel:
+            return
+        self.result = self._ids[sel[0]]
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class EditorApp:
     def __init__(self, root, token, username, statuses, statuses_path, limit, since,
                  stations_path="data/stations.json", dashboard_path="data/dashboard.html",
                  loc_class_families="loc_class_families.txt", ignore_plus=False,
                  edge_patches_path="data/edge_patches.json",
                  station_patches_path="data/station_patches.json",
-                 line_color_patches_path="data/line_color_patches.json"):
+                 line_color_patches_path="data/line_color_patches.json",
+                 home_region_path="data/home_region.json",
+                 boarding_patches_path="data/boarding_patches.json"):
         self.root = root
         self.token = token
         self.username = username
@@ -634,9 +827,12 @@ class EditorApp:
         self.edge_patches_path = edge_patches_path
         self.station_patches_path = station_patches_path
         self.line_color_patches_path = line_color_patches_path
+        self.home_region_path = home_region_path
+        self.boarding_patches_path = boarding_patches_path
         self.patches = ep.load_patches(edge_patches_path)
         self.station_patches = sp.load_patches(station_patches_path)
         self.line_color_patches = lcp.load_patches(line_color_patches_path)
+        self.boarding_patches = bp.load_patches(boarding_patches_path)
         self._patch_server = None
         self._station_server = None
         self.limit = limit
@@ -782,6 +978,27 @@ class EditorApp:
         self._color_swatch.bind("<Button-1>", lambda _e: self._pick_line_color())
         self._refresh_line_color()
 
+        board_row = ttk.Frame(right)
+        board_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(board_row, text="Einstieg").pack(side="left")
+        self._board_var = tk.StringVar(value="—")
+        ttk.Label(board_row, textvariable=self._board_var).pack(
+            side="left", padx=(8, 0)
+        )
+        self._board_src_var = tk.StringVar(value="")
+        ttk.Label(board_row, textvariable=self._board_src_var).pack(
+            side="left", padx=(6, 0)
+        )
+        self.board_pick_btn = ttk.Button(
+            board_row, text="Ändern", command=self._pick_boarding
+        )
+        self.board_pick_btn.pack(side="right")
+        self.board_reset_btn = ttk.Button(
+            board_row, text="Zurücksetzen", command=self._reset_boarding
+        )
+        self.board_reset_btn.pack(side="right", padx=(0, 6))
+        self._refresh_boarding()
+
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
 
         head = ttk.Frame(right)
@@ -867,6 +1084,10 @@ class EditorApp:
             act, text="Stationen anpassen", command=self._open_station_map
         )
         self.station_map_btn.pack(side="left", padx=8)
+        self.home_btn = ttk.Button(
+            act, text="Heimatregion…", command=self._open_home_region
+        )
+        self.home_btn.pack(side="left", padx=8)
         ttk.Label(
             act, text="Speichern sendet gestagte Änderungen nach Träwelling"
         ).pack(side="left")
@@ -895,6 +1116,14 @@ class EditorApp:
             self.edge_clr_ov_btn.configure(state=state)
         if hasattr(self, "station_map_btn"):
             self.station_map_btn.configure(state=state)
+        if hasattr(self, "home_btn"):
+            self.home_btn.configure(state=state)
+        if hasattr(self, "board_pick_btn"):
+            if busy:
+                self.board_pick_btn.configure(state="disabled")
+                self.board_reset_btn.configure(state="disabled")
+            else:
+                self._refresh_boarding()
         if msg:
             self.status_var.set(msg)
 
@@ -943,7 +1172,7 @@ class EditorApp:
         if not q:
             self.filtered = list(self.statuses)
         else:
-            self.filtered = [s for s in self.statuses if q in _search_blob(s)]
+            self.filtered = [s for s in self.statuses if self._matches_filter(s, q)]
         self._apply_sort()
         self._ignore_select = True
         self.trips.delete(*self.trips.get_children())
@@ -954,7 +1183,9 @@ class EditorApp:
                 continue
             iid = str(sid)
             tags = ("dirty",) if self._status_dirty(s) else ()
-            self.trips.insert("", "end", iid=iid, values=_trip_values(s), tags=tags)
+            self.trips.insert(
+                "", "end", iid=iid, values=_trip_values(self._shown(s)), tags=tags
+            )
             if selected_id is not None and sid == selected_id:
                 restore = iid
         self._ignore_select = False
@@ -967,7 +1198,7 @@ class EditorApp:
 
     def _col_sort_key(self, status, col):
         idx = TRIP_COLS.index(col)
-        text = (_trip_values(status)[idx] or "").strip()
+        text = (_trip_values(self._shown(status))[idx] or "").strip()
         return (text == "", text.casefold())
 
     def _apply_sort(self):
@@ -1012,7 +1243,7 @@ class EditorApp:
         if not self.trips.exists(iid):
             return
         self.trips.item(
-            iid, values=_trip_values(status),
+            iid, values=_trip_values(self._shown(status)),
             tags=("dirty",) if self._status_dirty(status) else (),
         )
 
@@ -1042,6 +1273,7 @@ class EditorApp:
         self._refresh_extra_tree()
         self._refresh_edges()
         self._refresh_line_color()
+        self._refresh_boarding()
 
     def _on_select(self):
         if self._busy or self._ignore_select:
@@ -1065,12 +1297,7 @@ class EditorApp:
 
     def _load_status(self, status):
         self.current = status
-        bits = _checkin_bits(status)
-        self.meta_var.set(
-            f"{bits['line']}\n"
-            f"{bits['origin']} → {bits['dest']}\n"
-            f"{_fmt_when(bits['dep'])}  →  {_fmt_when(bits['arr'])}"
-        )
+        self._apply_meta(status)
         body = status.get("body") or ""
         self.body.delete("1.0", "end")
         self.body.insert("1.0", body)
@@ -1082,6 +1309,26 @@ class EditorApp:
         self._refresh_extra_tree()
         self._refresh_edges()
         self._refresh_line_color()
+        self._refresh_boarding()
+
+    def _shown(self, status):
+        """Anzeige-Kopie mit lokalem Einstieg. Ohne Patch dasselbe Objekt."""
+        if status is None:
+            return None
+        return bp.preview_status(status, self.boarding_patches)
+
+    def _matches_filter(self, status, query):
+        blob = _search_blob(self._shown(status))
+        api = _station_name((status.get("checkin") or {}).get("origin") or {})
+        return query in blob or query in api.lower()
+
+    def _apply_meta(self, status):
+        bits = _checkin_bits(self._shown(status))
+        self.meta_var.set(
+            f"{bits['line']}\n"
+            f"{bits['origin']} → {bits['dest']}\n"
+            f"{_fmt_when(bits['dep'])}  →  {_fmt_when(bits['arr'])}"
+        )
 
     def _on_body_changed(self):
         self._update_body_count()
@@ -1223,6 +1470,94 @@ class EditorApp:
         self._refresh_line_color()
         self._set_status("Linienfarbe zurückgesetzt (lokal).")
 
+    def _refresh_boarding(self):
+        if not hasattr(self, "_board_var"):
+            return
+        status = self.current
+        if status is None:
+            self._board_var.set("—")
+            self._board_src_var.set("")
+            if hasattr(self, "board_pick_btn"):
+                self.board_pick_btn.configure(state="disabled")
+                self.board_reset_btn.configure(state="disabled")
+            return
+        shown = self._shown(status)
+        name = _station_name((shown.get("checkin") or {}).get("origin") or {})
+        api = _station_name((status.get("checkin") or {}).get("origin") or {})
+        patched = shown is not status
+        self._board_var.set(name)
+        if patched:
+            self._board_src_var.set(f"lokal (Träwelling: {api})")
+        else:
+            self._board_src_var.set("Träwelling")
+        if not hasattr(self, "board_pick_btn") or self._busy:
+            return
+        can = bool(bp.candidate_stopovers(status))
+        self.board_pick_btn.configure(state="normal" if can else "disabled")
+        self.board_reset_btn.configure(
+            state="normal" if patched else "disabled"
+        )
+
+    def _save_boarding(self):
+        if bp.save_patches(self.boarding_patches_path, self.boarding_patches):
+            return True
+        messagebox.showerror(
+            "Einstieg",
+            "boarding_patches.json nicht schreibbar.",
+            parent=self.root,
+        )
+        return False
+
+    def _after_boarding_change(self, msg):
+        if self.current is not None:
+            self._refresh_trip_row(self.current)
+            self._apply_meta(self.current)
+            self._refresh_edges()
+        self._refresh_boarding()
+        self._set_status(msg)
+
+    def _pick_boarding(self):
+        if self.current is None or self._busy:
+            return
+        if not bp.candidate_stopovers(self.current):
+            messagebox.showinfo(
+                "Einstieg",
+                "Für diese Fahrt lässt sich der Einstieg nicht ändern.",
+                parent=self.root,
+            )
+            return
+        api_so = bp.stopover_id(
+            ((self.current.get("checkin") or {}).get("origin") or {}).get("stopoverId")
+        )
+        selected = bp.override_stopover(self.boarding_patches, self.current)
+        if selected is None:
+            selected = api_so
+        dlg = BoardingDialog(self.root, self.current, selected)
+        if dlg.result is None:
+            return
+        sid = self.current.get("id")
+        if bp.stopover_id(dlg.result) == api_so:
+            bp.clear_origin(self.boarding_patches, sid)
+            saved_msg = "Einstieg zurückgesetzt (lokal)."
+        elif not bp.set_origin(self.boarding_patches, sid, dlg.result):
+            messagebox.showerror(
+                "Einstieg", "Ungültiger Halt.", parent=self.root
+            )
+            return
+        else:
+            saved_msg = "Einstieg gespeichert (lokal)."
+        if not self._save_boarding():
+            return
+        self._after_boarding_change(saved_msg)
+
+    def _reset_boarding(self):
+        if self.current is None or self._busy:
+            return
+        bp.clear_origin(self.boarding_patches, self.current.get("id"))
+        if not self._save_boarding():
+            return
+        self._after_boarding_change("Einstieg zurückgesetzt (lokal).")
+
     def _refresh_edges(self):
         if not hasattr(self, "edges"):
             return
@@ -1231,7 +1566,9 @@ class EditorApp:
         if not self.current:
             return
         sid = self.current.get("id")
-        for a, b in ep.consecutive_pairs(dl.traveled_stopovers(self.current)):
+        for a, b in ep.consecutive_pairs(
+            dl.traveled_stopovers(self._shown(self.current))
+        ):
             a_id, b_id = a.get("id"), b.get("id")
             kind = ep.patch_kind(self.patches, sid, a_id, b_id)
             self._edge_rows.append({
@@ -1701,6 +2038,26 @@ class EditorApp:
             xfer.set_row(sid, "error", msg)
             xfer.bump()
 
+    def _open_home_region(self):
+        saved = hr.load_operators(self.home_region_path)
+        names = hr.collect_operator_names(self.statuses, saved)
+        dlg = HomeRegionDialog(self.root, names, saved)
+        self.root.wait_window(dlg)
+        if dlg.result is None:
+            return
+        if not hr.save_operators(self.home_region_path, dlg.result):
+            messagebox.showerror(
+                "Heimatregion",
+                "home_region.json nicht schreibbar.",
+                parent=self.root,
+            )
+            return
+        n = len(dlg.result)
+        self._set_status(
+            f"Heimatregion gespeichert ({n} Operatoren, lokal). "
+            "Dashboard neu bauen, damit der Filter sie nutzt."
+        )
+
     def _on_rebuild_dashboard(self):
         self._commit_edit()
         if self._any_dirty():
@@ -1737,6 +2094,8 @@ class EditorApp:
             "--edge-patches", self.edge_patches_path,
             "--station-patches", self.station_patches_path,
             "--line-color-patches", self.line_color_patches_path,
+            "--home-region", self.home_region_path,
+            "--boarding-patches", self.boarding_patches_path,
         ]
         if self.ignore_plus:
             argv.append("--ignore-plus")
@@ -1851,6 +2210,14 @@ def parse_args(argv=None):
         help="Lokale Linienfarben-Patches (Default: data/line_color_patches.json).",
     )
     parser.add_argument(
+        "--home-region", default="data/home_region.json",
+        help="Lokale Operator-Liste der Heimatregion (Default: data/home_region.json).",
+    )
+    parser.add_argument(
+        "--boarding-patches", default="data/boarding_patches.json",
+        help="Lokale Einstiegs-Patches (Default: data/boarding_patches.json).",
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="Max. Anzahl Statuses beim Laden von der API.",
     )
@@ -1928,6 +2295,8 @@ def main(argv=None):
         edge_patches_path=args.edge_patches,
         station_patches_path=args.station_patches,
         line_color_patches_path=args.line_color_patches,
+        home_region_path=args.home_region,
+        boarding_patches_path=args.boarding_patches,
     )
     root.mainloop()
     return 0

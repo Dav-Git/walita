@@ -1,15 +1,12 @@
 // ---------- Tagesziele ----------
 (function(){
-  const DF=DATA.dailyFirsts||{};
-  const DR=DATA.dailyRepeats||{};
-  const dates=[...new Set(Object.keys(DF).concat(Object.keys(DR)))].sort();
+  let DF={}, DR={}, dates=[], LC={};
   const dateEl=document.getElementById("dailyDate");
   const prevBtn=document.getElementById("dailyPrev");
   const nextBtn=document.getElementById("dailyNext");
   const summaryEl=document.getElementById("dailySummary");
   const bodyEl=document.getElementById("dailyBody");
   const copyBtn=document.getElementById("dailyCopy");
-  const LC=DATA.lineColors||{};
   const INITIAL=40;
 
   function badge(key){
@@ -92,8 +89,18 @@
     ]},
   ];
 
-  bindDateInput(dateEl, DATA.kpis&&DATA.kpis.first, DATA.kpis&&DATA.kpis.last);
-  dateEl.value=dates.length?dates[dates.length-1]:(DATA.kpis&&DATA.kpis.last)||"";
+  function syncDaily(keep){
+    const src=D();
+    DF=src.dailyFirsts||{};
+    DR=src.dailyRepeats||{};
+    dates=[...new Set(Object.keys(DF).concat(Object.keys(DR)))].sort();
+    LC=src.lineColors||{};
+    const k=src.kpis||{};
+    bindDateInput(dateEl, k.first, k.last);
+    if(!keep || dates.indexOf(dateEl.value)<0){
+      dateEl.value=dates.length?dates[dates.length-1]:(k.last||"");
+    }
+  }
 
   function idxOf(d){ return dates.indexOf(d); }
 
@@ -278,7 +285,7 @@
     const d=dateEl.value;
     const dateLabel=fmtDate(d)||d||"—";
     const dayTrips=[];
-    (DATA.trips||[]).forEach((t,i)=>{
+    (D().trips||[]).forEach((t,i)=>{
       if((t.date||"").slice(0,10)===d) dayTrips.push({...t,_i:i});
     });
     const parts=[dateLabel, tripsTsv(dayTrips, {route:true})];
@@ -302,5 +309,7 @@
   dateEl.onchange=render;
   dateEl.oninput=render;
   copyBtn.onclick=copyTsv;
+  syncDaily(false);
   render();
+  onHomeChange(()=>{ syncDaily(true); render(); });
 })();

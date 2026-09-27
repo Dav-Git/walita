@@ -1,26 +1,27 @@
 // ---------- Overview ----------
 (function(){
-  const k=DATA.kpis;
-  document.getElementById("subtitle").textContent =
-    (k.first&&k.last)? (k.first+" – "+k.last) : "";
-  const builtEl=document.getElementById("builtAt");
-  if(builtEl && DATA.builtAt){
-    builtEl.textContent="Gebaut "+fmtDateTime(DATA.builtAt);
-  }
-  const cards=[
-    ["Check-ins", k.count.toLocaleString("de-DE")],
-    ["Distanz", k.distanceKm.toLocaleString("de-DE")+" km"],
-    ["Reisezeit", fmtDuration(k.durationMin)],
-    ["Punkte", k.points.toLocaleString("de-DE")],
-    ["Stationen", k.stations.toLocaleString("de-DE")],
-    ["Linien", k.lines.toLocaleString("de-DE")],
-  ];
-  document.getElementById("kpis").innerHTML = cards.map(c=>
-    `<div class="card"><div class="v">${esc(c[1])}</div><div class="l">${esc(c[0])}</div></div>`).join("");
-  (function(){
-    const segs=DATA.segments||[];
-    const tbody=document.querySelector("#segtable tbody");
-    const panel=document.getElementById("segpanel");
+  const tbody=document.querySelector("#segtable tbody");
+  const panel=document.getElementById("segpanel");
+  function render(){
+    const src=D();
+    const k=src.kpis||{};
+    document.getElementById("subtitle").textContent =
+      (k.first&&k.last)? (k.first+" – "+k.last) : "";
+    const builtEl=document.getElementById("builtAt");
+    if(builtEl && DATA.builtAt){
+      builtEl.textContent="Gebaut "+fmtDateTime(DATA.builtAt);
+    }
+    const cards=[
+      ["Check-ins", (k.count||0).toLocaleString("de-DE")],
+      ["Distanz", (k.distanceKm||0).toLocaleString("de-DE")+" km"],
+      ["Reisezeit", fmtDuration(k.durationMin||0)],
+      ["Punkte", (k.points||0).toLocaleString("de-DE")],
+      ["Stationen", (k.stations||0).toLocaleString("de-DE")],
+      ["Linien", (k.lines||0).toLocaleString("de-DE")],
+    ];
+    document.getElementById("kpis").innerHTML = cards.map(c=>
+      `<div class="card"><div class="v">${esc(c[1])}</div><div class="l">${esc(c[0])}</div></div>`).join("");
+    const segs=src.segments||[];
     let showAll=segs.length<=30;
     function paint(){
       const data=showAll?segs:segs.slice(0,30);
@@ -35,6 +36,7 @@
       } else if(btn){ btn.remove(); }
     }
     paint();
-  })();
+  }
+  render();
+  onHomeChange(render);
 })();
-

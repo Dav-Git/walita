@@ -88,6 +88,8 @@
     <div class="sidebar-foot">
       <div class="sub" id="subtitle"></div>
       <div class="sub built-at" id="builtAt"></div>
+      <button class="home-toggle" id="homeToggle" type="button" hidden
+        title="Nur Fahrten der Heimatregion" aria-pressed="false">Heimat</button>
       <button class="theme-toggle" id="themeToggle" title="Hell/Dunkel umschalten">
         <span id="themeIcon">🌙</span> <span id="themeLabel">Dunkel</span>
       </button>
@@ -160,6 +162,8 @@
       <h3 id="linesFilterHead" class="map-filter-head">Eingestellte Filter</h3>
       <div class="toolbar">
         <input type="search" id="linesFilter" placeholder="Suche (Linie, Operator …)">
+        <label class="ctl">Von <input type="date" id="linesDateFrom"></label>
+        <label class="ctl">Bis <input type="date" id="linesDateTo"></label>
         <span class="muted" id="linesCount"></span>
         <button type="button" class="toolbar-btn" id="linesCopy">Als TSV kopieren</button>
       </div>

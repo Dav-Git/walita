@@ -28,11 +28,15 @@ import sys
 from collections import Counter
 from datetime import datetime
 
+from boarding_patches import apply_to_statuses as apply_boarding_patches
+from boarding_patches import learn_edge_measures
+from boarding_patches import load_patches as load_boarding_patches
 from edge_patches import expand_edge_stopovers, load_patches
 from line_color_patches import apply_to_statuses as apply_line_color_patches
 from line_color_patches import load_patches as load_line_color_patches
 from line_color_patches import status_id as color_status_id
 from line_color_patches import to_css_pair
+from home_region import filter_statuses, load_operators
 from station_patches import apply_station_patches
 from station_patches import load_patches as load_station_patches
 from version import __version__
@@ -197,7 +201,7 @@ class EntityAgg:
         "first", "last", "dates",
         "min_distance_km", "max_distance_km", "min_route", "max_route",
         "vehicles", "loc_classes", "lines", "routes", "weekdays", "months",
-        "loc_class_counts",
+        "loc_class_counts", "loc_class_km",
     )
 
     def __init__(self):
@@ -223,6 +227,7 @@ class EntityAgg:
         self.weekdays = set()
         self.months = set()
         self.loc_class_counts = Counter()
+        self.loc_class_km = Counter()
 
     def add(self, *, distance_km, duration_min, points, segments, delay,
             date_str, route, weekday=None, month="",
@@ -260,6 +265,7 @@ class EntityAgg:
         if loc_class:
             self.loc_classes.add(loc_class)
             self.loc_class_counts[loc_class] += 1
+            self.loc_class_km[loc_class] += distance_km
         for v in vehicles or ():
             # Identität ist (Baureihe, Nummer); nackte Nummern zählen als ohne BR.
             if isinstance(v, tuple):
@@ -844,7 +850,8 @@ def pack_loc_class_families(mapping, variants):
 
 
 def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
-               edge_patches=None, station_patches=None, line_color_patches=None):
+               edge_patches=None, station_patches=None, line_color_patches=None,
+               boarding_patches=None, edge_measures=None):
     """Berechnet KPIs, Tabellenzeilen und Kanten für das Dashboard.
 
     `ignore_plus`: wenn True, werden Wagennummern-Tags nicht am '+' getrennt
@@ -857,11 +864,22 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
     station_patches.py); werden vor traveled_stopovers / Edge-Patches angewandt.
     `line_color_patches`: optionale routeColor-Overrides je Status (siehe
     line_color_patches.py); gelten vor der Linienfarben-Sammlung.
+    `boarding_patches`: optionale Einstiege je Status (siehe boarding_patches.py).
+    Gelten nach den Stations-Patches und vor der Linienfarbe. `edge_measures`
+    sind Kantenkilometer aus allen Statuses; fehlen sie, werden sie aus den
+    hier übergebenen Statuses gelernt.
     """
     sp = station_patches or {}
     if (sp.get("moves") or sp.get("merges")):
         stations, statuses, edge_patches = apply_station_patches(
             station_patches, stations, statuses, edge_patches
+        )
+    board_over = (boarding_patches or {}).get("overrides") or {}
+    if board_over:
+        if edge_measures is None:
+            edge_measures = learn_edge_measures(statuses)
+        statuses = apply_boarding_patches(
+            boarding_patches, statuses, edge_measures
         )
     color_over = (line_color_patches or {}).get("overrides") or {}
     if color_over:
@@ -926,6 +944,10 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
     uniq_routes = set()
     station_line = {}  # (station_id, lineKey) -> DatedCombo
     line_station_role = {}  # (station_id, lineKey) -> LineStationRole
+    # Pro Check-in für den Datumsfilter der Linienseite:
+    # [date, lineKey, locClass, km, [[sid, rollenBits], ...]]
+    line_rides = []
+    line_stop_names = {}
     trips_with_loc = 0
     trips_with_veh = 0
     min_trip = None  # {line, from, to, km, date}
@@ -964,6 +986,9 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             a.name = name
         return a
 
+    ride_bits = {}
+    _ROLE_BITS = {"boarded": 1, "alighted": 2, "through": 4, "passed": 8}
+
     def mark_line_role(sid, lk, attr):
         if sid is None or not lk:
             return
@@ -973,8 +998,12 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             r = LineStationRole()
             line_station_role[key] = r
         setattr(r, attr, getattr(r, attr) + 1)
+        bit = _ROLE_BITS.get(attr)
+        if bit:
+            ride_bits[sid] = ride_bits.get(sid, 0) | bit
 
     for status in statuses:
+        ride_bits.clear()
         checkin = status.get("checkin") or {}
         origin = checkin.get("origin") or {}
         destination = checkin.get("destination") or {}
@@ -1220,6 +1249,26 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
                 ve.add(date_str, line=lk)
                 if lk:
                     _get_dated(veh_edge_line, (loc, num, a_id, b_id, lk)).add(date_str)
+        if lk:
+            path = []
+            for s in expanded:
+                sid = s.get("id")
+                if sid is None:
+                    continue
+                if path and path[-1][0] == sid:
+                    continue
+                path.append([sid, ride_bits.get(sid, 0)])
+                label = s.get("name") or edge_names.get(sid) or str(sid)
+                prev_name = line_stop_names.get(str(sid))
+                if not prev_name or prev_name == str(sid):
+                    line_stop_names[str(sid)] = label
+            line_rides.append([
+                date_str,
+                lk,
+                loc_class,
+                round(distance / 1000, 1),
+                path,
+            ])
 
         # Entdeckte Kanten: Folgepaare der vollen Trip-Stopovers außerhalb
         # des Check-ins dieser Fahrt. Andere Fahrten (andere Linie/Datum/…)
@@ -1774,9 +1823,15 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
         _name, operator = split_line_key(lk)
         tagged = sum(agg.loc_class_counts.values())
         untagged = max(0, agg.count - tagged)
-        loc_classes = [[k, n] for k, n in agg.loc_class_counts.most_common()]
+        # [Baureihe, Fahrten, km]; Reihenfolge nach Fahrten, damit Farbindex
+        # und Legende für den Kilometer-Balken dieselben bleiben.
+        loc_classes = [
+            [k, n, round(agg.loc_class_km.get(k, 0.0), 1)]
+            for k, n in agg.loc_class_counts.most_common()
+        ]
         if untagged:
-            loc_classes.append(["", untagged])
+            untagged_km = max(0.0, agg.distance_km - sum(agg.loc_class_km.values()))
+            loc_classes.append(["", untagged, round(untagged_km, 1)])
         packed_routes = []
         for route in cover_directed_paths(
             line_edge_ids.get(lk, {}),
@@ -2048,6 +2103,8 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
         "trips": trips,
         "vehicles": vehicle_records,
         "lines": line_catalog,
+        "lineRides": line_rides,
+        "lineStopNames": line_stop_names,
         "lineColors": line_colors,
         "stations": map_stations,
         "variants": variants,
@@ -2074,6 +2131,7 @@ _DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashb
 # laden: tabs.js nutzt lexikalisch map/mapFitted/mapBounds aus map.js.
 _JS_FILES = (
     "js/helpers.js",
+    "js/home.js",
     "js/theme.js",
     "js/tabs.js",
     "js/overview.js",
@@ -2160,6 +2218,16 @@ def main(argv=None):
         help="Lokale Linienfarben-Patches je Status "
              "(Default: data/line_color_patches.json; fehlende Datei = keine Änderung).",
     )
+    parser.add_argument(
+        "--home-region", default="data/home_region.json",
+        help="Lokale Operator-Liste der Heimatregion "
+             "(Default: data/home_region.json; fehlende oder leere Datei = kein Filter).",
+    )
+    parser.add_argument(
+        "--boarding-patches", default="data/boarding_patches.json",
+        help="Lokale Einstiegs-Patches je Status "
+             "(Default: data/boarding_patches.json; fehlende Datei = keine Änderung).",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -2226,6 +2294,27 @@ def main(argv=None):
     elif os.path.isfile(args.line_color_patches):
         log(f"Linienfarben-Patches: {args.line_color_patches} ist leer.")
 
+    home_ops = load_operators(args.home_region)
+    if home_ops:
+        log(f"Heimatregion: {len(home_ops)} Operatoren aus {args.home_region}.")
+    elif os.path.isfile(args.home_region):
+        log(f"Heimatregion: {args.home_region} enthält keine Operatoren.")
+
+    boarding_patches = load_boarding_patches(args.boarding_patches)
+    n_board = len(boarding_patches.get("overrides") or {})
+    if n_board:
+        log(f"Einstiegs-Patches: {n_board} Einträge aus {args.boarding_patches}.")
+    elif os.path.isfile(args.boarding_patches):
+        log(f"Einstiegs-Patches: {args.boarding_patches} ist leer.")
+    edge_measures = None
+    if n_board:
+        measure_statuses = statuses
+        if (station_patches.get("moves") or station_patches.get("merges")):
+            _stations, measure_statuses, _edges = apply_station_patches(
+                station_patches, stations, statuses, edge_patches
+            )
+        edge_measures = learn_edge_measures(measure_statuses)
+
     data = build_data(
         statuses, stations,
         ignore_plus=args.ignore_plus,
@@ -2233,7 +2322,24 @@ def main(argv=None):
         edge_patches=edge_patches,
         station_patches=station_patches,
         line_color_patches=line_color_patches,
+        boarding_patches=boarding_patches,
+        edge_measures=edge_measures,
     )
+    if home_ops:
+        subset = filter_statuses(statuses, home_ops)
+        data["homeOperators"] = home_ops
+        data["home"] = build_data(
+            subset, stations,
+            ignore_plus=args.ignore_plus,
+            loc_class_families=loc_class_families,
+            edge_patches=edge_patches,
+            station_patches=station_patches,
+            line_color_patches=line_color_patches,
+            boarding_patches=boarding_patches,
+            edge_measures=edge_measures,
+        )
+        log(f"Heimatregion: {data['home']['kpis']['count']} von "
+            f"{data['kpis']['count']} Fahrten.")
     log(f"Ausgewertet: {data['kpis']['count']} Fahrten, {len(data['edges'])} Karten-Kanten, "
         f"{len(data['segments'])} Segmente.")
 

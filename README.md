@@ -21,10 +21,12 @@ Die beiden Stufen können auch einzeln genutzt werden:
 | `walita.py` | Export + Dashboard (empfohlen); `--edit` startet den Tag-Editor |
 | `download_statuses.py` | Stufe 1: API → `statuses.json` / `stations.json` / `trips.json` |
 | `build_dashboard.py` | Stufe 2: JSON → `dashboard.html` |
-| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern; Kanten-, Stations- und Linienfarben-Patches |
+| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern; Kanten-, Stations-, Linienfarben- und Einstiegs-Patches, Heimatregion |
 | `edge_patches.py` | Lokale Via-Patches (Default/Override) für grobe Kanten |
 | `station_patches.py` | Lokale Stations-Patches (Koordinaten verschieben, IDs mergen) |
 | `line_color_patches.py` | Lokale Linienfarben-Patches je Status |
+| `boarding_patches.py` | Lokale Einstiegs-Patches je Status |
+| `home_region.py` | Lokale Operator-Liste der Heimatregion |
 | `auth.py` | OAuth (Authorization Code + PKCE), von den anderen Skripten genutzt |
 
 ## Installation
@@ -47,6 +49,8 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── edge_patches.py        # Lokale Via-Patches für grobe Kanten
 ├── station_patches.py     # Lokale Stations-Patches (Koordinaten / Merges)
 ├── line_color_patches.py  # Lokale Linienfarben-Patches je Status
+├── boarding_patches.py    # Lokale Einstiegs-Patches je Status
+├── home_region.py         # Lokale Operator-Liste der Heimatregion
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
@@ -68,7 +72,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 
 > **Hinweis:** Eigene Reisedaten unter `data/` (`statuses.json`, `stations.json`,
 > `trips.json`, `dashboard.html`, `oauth_token.json`, `edge_patches.json`,
-> `station_patches.json`, `line_color_patches.json`) sind persönlich und
+> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`) sind persönlich und
 > gitignored. Zum Ausprobieren ohne Token: [Demo](#demo).
 
 ## Voraussetzungen
@@ -184,6 +188,8 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 | `edge_patches.json` | Lokale Via-Patches für grobe Kanten (Tag-Editor / Karte; kein API-Write) |
 | `station_patches.json` | Lokale Stations-Patches: Koordinaten und Merges (Tag-Editor / Karte; kein API-Write) |
 | `line_color_patches.json` | Lokale Linienfarben je Status (Tag-Editor; kein API-Write) |
+| `boarding_patches.json` | Lokaler Einstieg je Status (Tag-Editor; kein API-Write) |
+| `home_region.json` | Operatoren der Heimatregion (Tag-Editor; kein API-Write) |
 | `oauth_token.json` | OAuth Access-/Refresh-Token (gitignored) |
 
 ### Ablauf (Stufe 1)
@@ -326,6 +332,77 @@ Farbe (Träwelling / lokal / keine). **Ändern** öffnet Hex-Eingabe und
 Farbwähler; die Textfarbe wird aus dem Kontrast gesetzt. **Zurücksetzen**
 entfernt nur den lokalen Patch.
 
+### Einstiegs-Patches
+
+Träwelling legt den Einstieg in `checkin.origin` fest. Liegt der tatsächliche
+Einstieg früher oder später auf derselben Fahrt, kann er in
+`data/boarding_patches.json` (gitignored) **je Status** umgelegt werden –
+**nur lokal**, kein Upload. Der Ausstieg bleibt. Halte hinter dem Ausstieg
+sind nicht wählbar. Beim Dashboard-Bau ersetzt der Patch den Einstieg auf
+einer Kopie, bevor der befahrene Abschnitt geschnitten wird. Der nächste
+Export lässt `statuses.json` unverändert. Fehlt der Halt im neuen Export,
+gilt der Patch für diese Fahrt nicht.
+
+```json
+{
+  "overrides": [
+    { "statusId": 42, "stopoverId": 1093842227 }
+  ]
+}
+```
+
+Fahrzeit und Kilometer der Kopie folgen dem neuen Abschnitt. Die Fahrzeit
+kommt aus Abfahrt am neuen Halt und Ankunft am Ausstieg. Die Kilometer kommen
+aus anderen Fahrten: zuerst dieselbe Haltfolge, sonst die Summe bekannter
+Einzelkanten, sonst beim späteren Einstieg die bisherige Strecke minus das
+bekannte Präfix (beim früheren Einstieg plus die zusätzlichen Kanten). Eine
+Kante ist bekannt, wenn eine andere Fahrt genau dieses Stationspaar gefahren
+ist; fehlt in einer längeren Fahrt nur noch eine Kante, bekommt sie die
+Reststrecke. Die Luftlinie ist nur der Ersatz, wenn keine dieser Quellen
+reicht. Punkte bleiben die Träwelling-Punkte. Die Kanten-Maße werden einmal
+aus allen Fahrten gelernt und gelten auch im Heimat-Lauf.
+
+- Fehlende Datei = keine Änderung. Pfad: `--boarding-patches`
+  (Default `data/boarding_patches.json`).
+- Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
+
+Im Tag-Editor zeigt **Einstieg** rechts zur gewählten Fahrt den wirksamen Halt
+(Träwelling oder lokal inkl. Träwelling-Name). **Ändern** listet die Halte vor
+dem Ausstieg. **Zurücksetzen** entfernt nur den lokalen Patch. **Speichern**
+schickt den Einstieg nicht nach Träwelling.
+
+### Heimatregion
+
+Der Schalter **Heimat** in der Sidebar filtert alle Ansichten (Übersicht,
+Statistiken, Karte, Linien, Fahrten, Fahrzeuge, Tagesziele) auf eine
+selbst gewählte Operator-Liste. Intern ist das nur `checkin.operator.name`
+(nach den [Operator-Ersetzungen](#ablauf-stufe-1)). Ein leerer Name steht in
+der Liste als `""` und im Editor als „(ohne Operator)“.
+
+```json
+{
+  "operators": ["DB Regio AG", "S-Bahn Berlin GmbH"]
+}
+```
+
+- Die Liste liegt in `data/home_region.json` (gitignored). Fehlende oder leere
+  Datei = kein Schalter. Pfad: `--home-region` (Default `data/home_region.json`).
+- Beim Dashboard-Bau entsteht ein zweiter Aggregat-Block (`DATA.home`), weil
+  Übersicht, Statistiken und Tagesziele schon fertig zusammengefasst sind.
+  Kanten-, Stations-, Linienfarben- und Einstiegs-Patches gelten in beiden Läufen.
+  Die Kilometer bekannter Kanten stammen aus allen Fahrten, nicht nur aus der
+  Heimat-Teilmenge.
+- Der Schalter merkt sich An/Aus in `localStorage` (`trwl-home`), Standard aus.
+- Auf schmalen Viewports (unter 761px) ersetzt er den Hell/Dunkel-Knopf. Das
+  Theme folgt dort weiter der gespeicherten Wahl oder der Systemeinstellung.
+  Ab 761px stehen beide Knöpfe untereinander.
+- Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
+
+Im Tag-Editor öffnet **Heimatregion…** eine Checkbox-Liste aller Operatoren
+aus den geladenen Fahrten, plus Namen, die schon in der Datei stehen. Suche,
+**Alle** und **Keine** gelten für die gerade sichtbaren Zeilen. Speichern
+schreibt nur die lokale Datei, nicht nach Träwelling.
+
 ### OAuth-Login
 
 Eine eigene Träwelling-Anwendung musst du **nicht** anlegen. Client-ID und
@@ -349,8 +426,9 @@ Wer bewusst einen eigenen Client nutzen will: `--client-id` /
 
 ## Dashboard (GUI)
 
-Eine selbstständige HTML-Datei mit Sidebar und Hell/Dunkel-Umschalter
-(System-Default, Auswahl in `localStorage`). Unten links in der Sidebar
+Eine selbstständige HTML-Datei mit Sidebar, Hell/Dunkel-Umschalter
+(System-Default, Auswahl in `localStorage`) und optionalem Schalter
+**Heimat** (siehe [Heimatregion](#heimatregion)). Unten links in der Sidebar
 stehen der Zeitraum der Check-ins und der Zeitpunkt des letzten Builds.
 Die Quellen liegen unter `dashboard/` und werden beim Erzeugen inline
 zusammengefügt. Sieben Ansichten:
@@ -419,6 +497,8 @@ python3 build_dashboard.py --statuses x.json --stations y.json -o out.html
 python3 build_dashboard.py --edge-patches data/edge_patches.json --open
 python3 build_dashboard.py --station-patches data/station_patches.json --open
 python3 build_dashboard.py --line-color-patches data/line_color_patches.json --open
+python3 build_dashboard.py --boarding-patches data/boarding_patches.json --open
+python3 build_dashboard.py --home-region data/home_region.json --open
 ```
 
 ## Tag-Editor
@@ -441,6 +521,10 @@ lokale Via-Patches (`data/edge_patches.json`, siehe [Kanten-Patches](#kanten-pat
 (`data/station_patches.json`, siehe [Stations-Patches](#stations-patches-koordinaten-und-merges)).
 **Linienfarbe** ändert `routeColor` der gewählten Fahrt lokal
 (`data/line_color_patches.json`, siehe [Linienfarben-Patches](#linienfarben-patches)).
+**Einstieg** legt den Zustieg auf einen anderen Halt derselben Fahrt
+(`data/boarding_patches.json`, siehe [Einstiegs-Patches](#einstiegs-patches)).
+**Heimatregion…** hakt die Operatoren an, die der Schalter **Heimat**
+durchlässt (`data/home_region.json`, siehe [Heimatregion](#heimatregion)).
 Danach Dashboard neu bauen.
 
 ```bash

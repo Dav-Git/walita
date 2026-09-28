@@ -21,12 +21,13 @@ Die beiden Stufen können auch einzeln genutzt werden:
 | `walita.py` | Export + Dashboard (empfohlen); `--edit` startet den Tag-Editor |
 | `download_statuses.py` | Stufe 1: API → `statuses.json` / `stations.json` / `trips.json` |
 | `build_dashboard.py` | Stufe 2: JSON → `dashboard.html` |
-| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern; Kanten-, Stations-, Linienfarben- und Einstiegs-Patches, Heimatregion |
+| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern; Kanten-, Stations-, Linienfarben- und Einstiegs-Patches, Heimatregion, Fuhrpark |
 | `edge_patches.py` | Lokale Via-Patches (Default/Override) für grobe Kanten |
 | `station_patches.py` | Lokale Stations-Patches (Koordinaten verschieben, IDs mergen) |
 | `line_color_patches.py` | Lokale Linienfarben-Patches je Status |
 | `boarding_patches.py` | Lokale Einstiegs-Patches je Status |
 | `home_region.py` | Lokale Operator-Liste der Heimatregion |
+| `vehicle_roster.py` | Lokaler Fuhrpark: Fahrzeugnummern je Baureihe |
 | `auth.py` | OAuth (Authorization Code + PKCE), von den anderen Skripten genutzt |
 
 ## Installation
@@ -51,6 +52,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── line_color_patches.py  # Lokale Linienfarben-Patches je Status
 ├── boarding_patches.py    # Lokale Einstiegs-Patches je Status
 ├── home_region.py         # Lokale Operator-Liste der Heimatregion
+├── vehicle_roster.py      # Lokaler Fuhrpark: Fahrzeugnummern je Baureihe
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
@@ -72,7 +74,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 
 > **Hinweis:** Eigene Reisedaten unter `data/` (`statuses.json`, `stations.json`,
 > `trips.json`, `dashboard.html`, `oauth_token.json`, `edge_patches.json`,
-> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`) sind persönlich und
+> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`, `vehicle_roster.json`) sind persönlich und
 > gitignored. Zum Ausprobieren ohne Token: [Demo](#demo).
 
 ## Voraussetzungen
@@ -190,6 +192,7 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 | `line_color_patches.json` | Lokale Linienfarben je Status (Tag-Editor; kein API-Write) |
 | `boarding_patches.json` | Lokaler Einstieg je Status (Tag-Editor; kein API-Write) |
 | `home_region.json` | Operatoren der Heimatregion (Tag-Editor; kein API-Write) |
+| `vehicle_roster.json` | Fuhrpark: Fahrzeugnummern je Baureihe (Tag-Editor; kein API-Write) |
 | `oauth_token.json` | OAuth Access-/Refresh-Token (gitignored) |
 
 ### Ablauf (Stufe 1)
@@ -403,6 +406,47 @@ aus den geladenen Fahrten, plus Namen, die schon in der Datei stehen. Suche,
 **Alle** und **Keine** gelten für die gerade sichtbaren Zeilen. Speichern
 schreibt nur die lokale Datei, nicht nach Träwelling.
 
+### Fuhrpark
+
+Je Baureihe kann optional eine Liste konkreter Fahrzeugnummern hinterlegt werden.
+Die Fahrzeuge-Seite zeigt dann jede Nummer als eigene Zeile, auch ohne Fahrt, und
+im Gruppenkopf die Abdeckung (`8/10 (80%)`): gefahrene nicht ausgemusterte
+Nummern im aktuellen Filter, geteilt durch alle nicht ausgemusterten Nummern.
+Ausgemusterte Wagen haben einen schwarzen Hintergrund. Ist ein Datum bekannt,
+steht es an der Nummer (`ausgem. 12.06.2019`). Für den Goldrand gelten sie als
+nicht vorhanden: 228 und 230 bleiben ein Block, wenn 229 ausgemustert ist; der
+Goldstrich läuft durch die schwarze Zeile. Eine aktive, ungefahrene Nummer
+dazwischen unterbricht den Block. Ohne Fuhrpark bleibt der Goldrand bei
+benachbarten Zeilen mit Differenz ±1.
+
+```json
+{
+  "types": {
+    "425": [
+      {"number": "228", "withdrawn": false},
+      {"number": "229", "withdrawn": true, "withdrawnOn": "2019-06-12"}
+    ]
+  }
+}
+```
+
+- Die Datei liegt in `data/vehicle_roster.json` (gitignored). Fehlende Datei =
+  kein Fuhrpark. Pfad: `--vehicle-roster` (Default `data/vehicle_roster.json`).
+- Anlegen im Tag-Editor per Nummernbereich mit Schrittweite (`301–311`,
+  Schritt `2` ergibt nur die ungeraden). Jede Nummer lässt sich einzeln
+  ausmustern, datieren oder löschen. `withdrawnOn` wird nur gespeichert, wenn
+  das Fahrzeug ausgemustert ist und das Datum bekannt ist.
+- Die Abdeckung und die Leerzeilen gelten bei Gruppierung nach Baureihe.
+  **Nicht benutzte ausblenden** nimmt Zeilen ohne Fahrt aus der Tabelle; die
+  Abdeckung im Kopf zählt sie weiter. Nach Produktkategorie bleiben nur
+  gefahrene Wagen; ausgemusterte davon trotzdem schwarz, der Goldrand
+  überspringt sie.
+- Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
+
+Im Tag-Editor öffnet **Fuhrpark…** die Baureihen aus den geladenen Fahrten plus
+schon gespeicherte Typen. Speichern schreibt nur die lokale Datei, nicht nach
+Träwelling.
+
 ### OAuth-Login
 
 Eine eigene Träwelling-Anwendung musst du **nicht** anlegen. Client-ID und
@@ -430,6 +474,7 @@ Eine selbstständige HTML-Datei mit Sidebar, Hell/Dunkel-Umschalter
 (System-Default, Auswahl in `localStorage`) und optionalem Schalter
 **Heimat** (siehe [Heimatregion](#heimatregion)). Unten links in der Sidebar
 stehen der Zeitraum der Check-ins und der Zeitpunkt des letzten Builds.
+Neben jedem Datumsfeld steht ein ×, das genau dieses Feld leert.
 Die Quellen liegen unter `dashboard/` und werden beim Erzeugen inline
 zusammengefügt. Sieben Ansichten:
 
@@ -459,7 +504,9 @@ zusammengefügt. Sieben Ansichten:
 
 - **Statistiken** – Rankings zu Linien, Baureihen, Fahrzeugen und Stationen
   (Ein-/Ausstieg/gehalten/physische Durchfahrt, kombinierbare Filter), Kanten, Wiederholungen,
-  Kreuztabellen.
+  Kreuztabellen. Datumsbereich (Von/Bis) rechnet diese Tabellen für die
+  Check-ins in dem Zeitraum neu; ohne Von/Bis bleibt die voraggregierte
+  Gesamtstatistik.
 
   ![Statistiken](docs/screenshots/04-statistiken.png)
 
@@ -470,7 +517,8 @@ zusammengefügt. Sieben Ansichten:
   ![Fahrten](docs/screenshots/06-fahrten.png)
 
 - **Fahrzeuge** – Matrix getaggter Wagennummern (`trwl:vehicle_number`) je Linie,
-  gruppiert nach Baureihe/Kategorie.
+  gruppiert nach Baureihe/Kategorie. Mit Fuhrpark je Baureihe jede definierte
+  Nummer, die Abdeckung und ausgemusterte Wagen schwarz (Goldrand läuft durch).
 
   ![Fahrzeuge](docs/screenshots/05-fahrzeuge.png)
 
@@ -499,6 +547,7 @@ python3 build_dashboard.py --station-patches data/station_patches.json --open
 python3 build_dashboard.py --line-color-patches data/line_color_patches.json --open
 python3 build_dashboard.py --boarding-patches data/boarding_patches.json --open
 python3 build_dashboard.py --home-region data/home_region.json --open
+python3 build_dashboard.py --vehicle-roster data/vehicle_roster.json --open
 ```
 
 ## Tag-Editor
@@ -525,6 +574,8 @@ lokale Via-Patches (`data/edge_patches.json`, siehe [Kanten-Patches](#kanten-pat
 (`data/boarding_patches.json`, siehe [Einstiegs-Patches](#einstiegs-patches)).
 **Heimatregion…** hakt die Operatoren an, die der Schalter **Heimat**
 durchlässt (`data/home_region.json`, siehe [Heimatregion](#heimatregion)).
+**Fuhrpark…** pflegt die Fahrzeugnummern je Baureihe
+(`data/vehicle_roster.json`, siehe [Fuhrpark](#fuhrpark)).
 Danach Dashboard neu bauen.
 
 ```bash

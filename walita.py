@@ -143,6 +143,11 @@ def main(argv=None):
         help="Lokale Einstiegs-Patches je Status "
              "(Default: data/boarding_patches.json; fehlende Datei = keine Änderung).",
     )
+    dash.add_argument(
+        "--vehicle-roster", default="data/vehicle_roster.json",
+        help="Lokaler Fuhrpark je Baureihe "
+             "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
+    )
 
     mode = parser.add_argument_group("Modus")
     # Beide Modi überspringen den Export – gemeinsam angegeben wäre unklar, welcher gilt.
@@ -219,6 +224,7 @@ def main(argv=None):
         edit_argv.extend(["--line-color-patches", args.line_color_patches])
         edit_argv.extend(["--home-region", args.home_region])
         edit_argv.extend(["--boarding-patches", args.boarding_patches])
+        edit_argv.extend(["--vehicle-roster", args.vehicle_roster])
         return status_editor.main(edit_argv)
 
     if args.demo:
@@ -237,6 +243,7 @@ def main(argv=None):
         dash_argv.extend(["--line-color-patches", args.line_color_patches])
         dash_argv.extend(["--home-region", args.home_region])
         dash_argv.extend(["--boarding-patches", args.boarding_patches])
+        dash_argv.extend(["--vehicle-roster", args.vehicle_roster])
         return build_dashboard.main(dash_argv)
 
     if not args.dashboard_only:
@@ -281,6 +288,7 @@ def main(argv=None):
     dash_argv.extend(["--line-color-patches", args.line_color_patches])
     dash_argv.extend(["--home-region", args.home_region])
     dash_argv.extend(["--boarding-patches", args.boarding_patches])
+    dash_argv.extend(["--vehicle-roster", args.vehicle_roster])
     return build_dashboard.main(dash_argv)
 
 

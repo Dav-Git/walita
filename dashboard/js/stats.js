@@ -1,4 +1,581 @@
 // ---------- Statistiken (Linie / Baureihe / Fahrzeug / Station) ----------
+// Neuaufbau für den Von/Bis-Filter. Leerer Bereich nutzt das voraggregierte DATA.stats.
+const STATS_WEEKDAYS=["0","1","2","3","4","5","6"];
+const STATS_DELAYS=["früh","0–5","6–15","16–30","31–60",">60","unbekannt"];
+
+function statsRound1(n){
+  // Entspricht Pythons round(n, 1): exakter Float-Wert, dann Halbe-auf-Gerade.
+  if(!Number.isFinite(n)) return n;
+  if(n===0) return 0;
+  const buf=new ArrayBuffer(8);
+  const view=new DataView(buf);
+  view.setFloat64(0, n);
+  const hi=BigInt(view.getUint32(0));
+  const lo=BigInt(view.getUint32(4));
+  const bits=(hi<<32n)|lo;
+  const sign=(bits>>63n)?-1n:1n;
+  let exp=Number((bits>>52n)&0x7ffn);
+  let mant=bits&((1n<<52n)-1n);
+  if(exp===0x7ff) return n;
+  if(exp===0){
+    exp=-1022-52;
+  }else{
+    mant|=1n<<52n;
+    exp=exp-1023-52;
+  }
+  const num=mant*5n;
+  const e=exp+1;
+  let rounded;
+  if(e>=0){
+    rounded=num<<BigInt(e);
+  }else{
+    const den=1n<<BigInt(-e);
+    const quot=num/den;
+    const rem=num%den;
+    const half=den>>1n;
+    rounded=quot;
+    if(rem>half || (rem===half && (quot&1n))) rounded=quot+1n;
+  }
+  const signed=sign<0n?-rounded:rounded;
+  return Number(signed)/10;
+}
+function statsYmd(t){ return (t&&t.date||"").slice(0,10); }
+function statsWeekday(ymd){
+  if(!ymd||ymd.length<10) return null;
+  const y=+ymd.slice(0,4), m=+ymd.slice(5,7), d=+ymd.slice(8,10);
+  if(!y||!m||!d) return null;
+  const dt=new Date(y, m-1, d);
+  if(dt.getFullYear()!==y||dt.getMonth()!==m-1||dt.getDate()!==d) return null;
+  return (dt.getDay()+6)%7;
+}
+function statsDelayBucket(delay){
+  if(delay==null||delay==="") return "unbekannt";
+  if(delay<0) return "früh";
+  if(delay<=5) return "0–5";
+  if(delay<=15) return "6–15";
+  if(delay<=30) return "16–30";
+  if(delay<=60) return "31–60";
+  return ">60";
+}
+function statsVehKey(loc, num){
+  return (num&&loc)?(num+LINE_SEP+loc):(num||loc||"");
+}
+function statsCmp(a,b){ return a<b?-1:a>b?1:0; }
+function statsCmpDesc(a,b){ return statsCmp(b,a); }
+
+function aggregateStats(src, from, to){
+  const trips=src.trips||[];
+  const allEdges=src.statEdges||[];
+  const allStops=src.statStops||[];
+  const edgeNames=src.statEdgeNames||{};
+  const stopNames=src.statStopNames||{};
+  const idxs=[];
+  for(let i=0;i<trips.length;i++){
+    const day=statsYmd(trips[i]);
+    if(from||to){
+      if(!day) continue;
+      if(from && day<from) continue;
+      if(to && day>to) continue;
+    }
+    idxs.push(i);
+  }
+
+  function newEnt(){
+    return {
+      count:0, km:0, dur:0, points:0,
+      delaySum:0, delayN:0, onTime:0,
+      first:null, last:null,
+      minKm:null, maxKm:null, minRoute:"", maxRoute:"",
+      vehicles:new Set(), locClasses:new Set(), lines:new Set(),
+      routes:new Set(), weekdays:new Set(), months:new Set(),
+    };
+  }
+  function touchDay(obj, day){
+    if(!day) return;
+    if(obj.first==null||day<obj.first) obj.first=day;
+    if(obj.last==null||day>obj.last) obj.last=day;
+  }
+  function addEnt(a, o){
+    a.count++;
+    a.km+=o.km;
+    a.dur+=o.dur;
+    a.points+=o.points;
+    if(o.delay!=null && o.delay!==""){
+      a.delaySum+=o.delay;
+      a.delayN++;
+      if(o.delay<=5) a.onTime++;
+    }
+    touchDay(a, o.day);
+    if(a.minKm==null||o.km<a.minKm){ a.minKm=o.km; a.minRoute=o.route; }
+    if(a.maxKm==null||o.km>a.maxKm){ a.maxKm=o.km; a.maxRoute=o.route; }
+    if(o.route) a.routes.add(o.route);
+    if(o.weekday!=null) a.weekdays.add(String(o.weekday));
+    if(o.month) a.months.add(o.month);
+    if(o.line) a.lines.add(o.line);
+    if(o.loc) a.locClasses.add(o.loc);
+    (o.vehicles||[]).forEach(v=>{ if(v[1]) a.vehicles.add((v[0]||"")+LINE_SEP+v[1]); });
+  }
+  function entRow(a, key, kind){
+    const n=a.count||1;
+    const row={
+      key:key,
+      count:a.count,
+      distanceKm:statsRound1(a.km),
+      durationMin:a.dur,
+      points:a.points,
+      avgDistanceKm:statsRound1(a.km/n),
+      avgDurationMin:statsRound1(a.dur/n),
+      first:a.first,
+      last:a.last,
+      minDistanceKm:a.minKm,
+      maxDistanceKm:a.maxKm,
+      minRoute:a.minRoute,
+      maxRoute:a.maxRoute,
+      avgDelay:a.delayN?statsRound1(a.delaySum/a.delayN):null,
+      onTimePct:a.delayN?statsRound1(100*a.onTime/a.delayN):null,
+      uniqueRoutes:a.routes.size,
+      uniqueWeekdays:a.weekdays.size,
+      uniqueMonths:a.months.size,
+    };
+    if(kind==="line"){
+      row.uniqueVehicles=a.vehicles.size;
+      row.uniqueLocClasses=a.locClasses.size;
+    }else if(kind==="locClass"){
+      row.uniqueVehicles=a.vehicles.size;
+      row.uniqueLines=a.lines.size;
+    }else if(kind==="vehicle"){
+      row.uniqueLines=a.lines.size;
+    }
+    return row;
+  }
+  function finalizeEnt(map, kind){
+    const rows=[];
+    map.forEach((a,k)=>{
+      if(kind==="vehicle"){
+        const i=k.indexOf(LINE_SEP);
+        const loc=i<0?"":k.slice(0,i);
+        const num=i<0?k:k.slice(i+1);
+        if(!num) return;
+        const row=entRow(a, num, kind);
+        row.locClass=loc||"";
+        rows.push(row);
+      }else if(k){
+        rows.push(entRow(a, k, kind));
+      }
+    });
+    rows.sort((a,b)=>{
+      if(a.distanceKm!==b.distanceKm) return b.distanceKm-a.distanceKm;
+      if(a.count!==b.count) return b.count-a.count;
+      const c=statsCmp(String(a.key), String(b.key));
+      if(c) return c;
+      return statsCmp(String(a.locClass||""), String(b.locClass||""));
+    });
+    return rows;
+  }
+
+  function bump(store, row, col, km){
+    if(row==null||col==null||row===""||col==="") return;
+    const k=row+"\0"+col;
+    let cell=store.get(k);
+    if(!cell){
+      cell={n:0, km:0, row:row, col:col};
+      store.set(k, cell);
+    }
+    cell.n++;
+    cell.km+=km;
+  }
+  function packCross(store, colOrder){
+    const cells=[...store.values()];
+    if(!cells.length) return {rows:[], cols:[], counts:[], kms:[]};
+    const rowTot=new Map(), colTot=new Map();
+    const rowSeen=[], colSeen=[];
+    cells.forEach(cell=>{
+      if(!rowTot.has(cell.row)){ rowTot.set(cell.row, 0); rowSeen.push(cell.row); }
+      if(!colTot.has(cell.col)){ colTot.set(cell.col, 0); colSeen.push(cell.col); }
+      rowTot.set(cell.row, rowTot.get(cell.row)+cell.n);
+      colTot.set(cell.col, colTot.get(cell.col)+cell.n);
+    });
+    const byCount=(seen, tot)=>seen.slice().sort((a,b)=>tot.get(b)-tot.get(a));
+    const rows=byCount(rowSeen, rowTot);
+    let cols;
+    if(!colOrder) cols=byCount(colSeen, colTot);
+    else {
+      const present=new Set(colSeen);
+      cols=colOrder.filter(c=>present.has(c));
+      const picked=new Set(cols);
+      cols=cols.concat(byCount(colSeen, colTot).filter(c=>!picked.has(c)));
+    }
+    const ri=new Map(rows.map((r,i)=>[r,i]));
+    const ci=new Map(cols.map((c,i)=>[c,i]));
+    const counts=rows.map(()=>cols.map(()=>0));
+    const kms=rows.map(()=>cols.map(()=>0));
+    cells.forEach(cell=>{
+      const r=ri.get(cell.row), c=ci.get(cell.col);
+      if(r==null||c==null) return;
+      counts[r][c]=cell.n;
+      kms[r][c]=statsRound1(cell.km);
+    });
+    return {rows:rows, cols:cols, counts:counts, kms:kms};
+  }
+
+  function newCombo(){ return {count:0, first:null, last:null, lines:new Set()}; }
+  function addCombo(c, day, line){
+    c.count++;
+    touchDay(c, day);
+    if(line) c.lines.add(line);
+  }
+  function edgeLabel(a, b){
+    const lab=edgeNames[String(a)+LINE_SEP+String(b)];
+    if(lab) return lab;
+    return [stopNames[String(a)]||String(a), stopNames[String(b)]||String(b)];
+  }
+
+  const lineAggs=new Map(), locAggs=new Map(), vehAggs=new Map();
+  const crosses={
+    crossLocClassLine:new Map(), crossVehicleLine:new Map(),
+    crossLineMonth:new Map(), crossLineWeekday:new Map(),
+    crossLocClassMonth:new Map(), crossLocClassWeekday:new Map(),
+    crossLocClassCategory:new Map(), crossLineCategory:new Map(),
+    crossLineDelay:new Map(), crossLocClassDelay:new Map(),
+    crossVehicleMonth:new Map(),
+  };
+  const uniqRoutes=new Set();
+  const lineVehicle=new Set(), lineLoc=new Set(), vehicleLoc=new Set();
+  const edgeAggs=new Map();
+  const vehEdge=new Map(), vehEdgeLine=new Map(), lineEdge=new Map(), locEdge=new Map();
+  const stationAggs=new Map();
+  let tripsWithLoc=0, tripsWithVeh=0, minTrip=null, maxTrip=null;
+
+  idxs.forEach(i=>{
+    const t=trips[i];
+    const day=statsYmd(t);
+    const lk=t.line||"";
+    const loc=t.locClass||"";
+    const cat=t.category||"";
+    const km=Number(t.distanceKm)||0;
+    const dur=Number(t.durationMin)||0;
+    const points=Number(t.points)||0;
+    const delay=(t.delay==null||t.delay==="")?null:Number(t.delay);
+    const fromName=t.from||"", toName=t.to||"";
+    const route=(fromName||toName)?(fromName+" → "+toName):"";
+    const disp=lineName(lk);
+    const taggedRoute=disp?(disp+": "+route):route;
+    const weekday=day?statsWeekday(day):null;
+    const month=day&&day.length>=7?day.slice(0,7):"";
+    const wdKey=weekday==null?"":String(weekday);
+    const vehs=(t.vehicles||"").trim()
+      ? (t.vehicles||"").split(", ").filter(Boolean).map(n=>[loc, n])
+      : [];
+    if(route) uniqRoutes.add(route);
+    const info={line:disp, from:fromName, to:toName, km:km, date:day};
+    if(minTrip==null||km<minTrip.km) minTrip=info;
+    if(maxTrip==null||km>maxTrip.km) maxTrip=info;
+    if(loc) tripsWithLoc++;
+    if(vehs.length) tripsWithVeh++;
+    const base={km:km, dur:dur, points:points, delay:delay, day:day, weekday:weekday, month:month, vehicles:vehs};
+    if(lk){
+      if(!lineAggs.has(lk)) lineAggs.set(lk, newEnt());
+      addEnt(lineAggs.get(lk), Object.assign({}, base, {route:route, line:"", loc:loc}));
+      bump(crosses.crossLineMonth, lk, month, km);
+      bump(crosses.crossLineWeekday, lk, wdKey, km);
+      bump(crosses.crossLineCategory, lk, cat, km);
+      bump(crosses.crossLineDelay, lk, statsDelayBucket(delay), km);
+    }
+    if(loc){
+      if(!locAggs.has(loc)) locAggs.set(loc, newEnt());
+      addEnt(locAggs.get(loc), Object.assign({}, base, {route:taggedRoute, line:lk, loc:""}));
+      bump(crosses.crossLocClassLine, loc, lk, km);
+      bump(crosses.crossLocClassMonth, loc, month, km);
+      bump(crosses.crossLocClassWeekday, loc, wdKey, km);
+      bump(crosses.crossLocClassCategory, loc, cat, km);
+      bump(crosses.crossLocClassDelay, loc, statsDelayBucket(delay), km);
+      if(lk) lineLoc.add(lk+LINE_SEP+loc);
+    }
+    vehs.forEach(pair=>{
+      const vloc=pair[0]||"", num=pair[1];
+      const vk=vloc+LINE_SEP+num;
+      if(!vehAggs.has(vk)) vehAggs.set(vk, newEnt());
+      addEnt(vehAggs.get(vk), Object.assign({}, base, {route:taggedRoute, line:lk, loc:"", vehicles:[]}));
+      bump(crosses.crossVehicleLine, statsVehKey(vloc, num), lk, km);
+      bump(crosses.crossVehicleMonth, statsVehKey(vloc, num), month, km);
+      if(lk) lineVehicle.add(lk+"\0"+vloc+"\0"+num);
+      vehicleLoc.add(num+"\0"+vloc);
+    });
+
+    (allStops[i]||[]).forEach(pair=>{
+      const sid=pair[0], bits=pair[1]||0;
+      if(!bits) return;
+      const key=String(sid);
+      let st=stationAggs.get(key);
+      if(!st){
+        st={
+          name:stopNames[key]||key,
+          boarded:0, alighted:0, through:0, passed:0,
+          first:null, last:null, lines:new Set(),
+        };
+        stationAggs.set(key, st);
+      }
+      if(bits&1) st.boarded++;
+      if(bits&2) st.alighted++;
+      if(bits&4) st.through++;
+      if(bits&8) st.passed++;
+      touchDay(st, day);
+      if(lk) st.lines.add(lk);
+    });
+
+    (allEdges[i]||[]).forEach(pair=>{
+      const a=pair[0], b=pair[1];
+      const ek=String(a)+LINE_SEP+String(b);
+      let e=edgeAggs.get(ek);
+      if(!e){
+        const lab=edgeLabel(a, b);
+        e={
+          from:lab[0], to:lab[1], count:0, first:null, last:null,
+          vehicles:new Set(), lines:new Set(), locs:new Set(),
+        };
+        edgeAggs.set(ek, e);
+      }
+      e.count++;
+      touchDay(e, day);
+      if(lk) e.lines.add(lk);
+      if(loc) e.locs.add(loc);
+      vehs.forEach(v=>{ if(v[1]) e.vehicles.add((v[0]||"")+LINE_SEP+v[1]); });
+      if(lk){
+        const lkKey=lk+"\0"+ek;
+        if(!lineEdge.has(lkKey)) lineEdge.set(lkKey, newCombo());
+        addCombo(lineEdge.get(lkKey), day, "");
+      }
+      if(loc){
+        const locKey=loc+"\0"+ek;
+        if(!locEdge.has(locKey)) locEdge.set(locKey, newCombo());
+        addCombo(locEdge.get(locKey), day, "");
+      }
+      vehs.forEach(v=>{
+        if(!v[1]) return;
+        const vk=(v[0]||"")+LINE_SEP+v[1]+"\0"+ek;
+        if(!vehEdge.has(vk)) vehEdge.set(vk, newCombo());
+        addCombo(vehEdge.get(vk), day, lk);
+        if(lk){
+          const vl=vk+"\0"+lk;
+          if(!vehEdgeLine.has(vl)) vehEdgeLine.set(vl, newCombo());
+          addCombo(vehEdgeLine.get(vl), day, "");
+        }
+      });
+    });
+  });
+
+  const byLine=finalizeEnt(lineAggs, "line");
+  const byLoc=finalizeEnt(locAggs, "locClass");
+  const byVeh=finalizeEnt(vehAggs, "vehicle");
+  const monthSet=new Set();
+  [crosses.crossLineMonth, crosses.crossLocClassMonth, crosses.crossVehicleMonth].forEach(store=>{
+    store.forEach(cell=>{ if(cell.col) monthSet.add(cell.col); });
+  });
+  const months=[...monthSet].sort();
+  const nTrips=idxs.length;
+  const denom=nTrips||1;
+  const topLine=byLine[0]||null;
+  const topVeh=byVeh[0]||null;
+
+  function edgeRow(e){
+    return {
+      from:e.from, to:e.to, count:e.count, first:e.first, last:e.last,
+      uniqueVehicles:e.vehicles.size,
+      uniqueLines:e.lines.size,
+      uniqueLocClasses:e.locs.size,
+    };
+  }
+  const allEdgeRows=[...edgeAggs.values()].map(edgeRow);
+  function sortEdges(rows, cmp){ return rows.slice().sort(cmp); }
+  const byCount=sortEdges(allEdgeRows, (a,b)=>{
+    if(a.count!==b.count) return b.count-a.count;
+    const c=statsCmp(a.from||"", b.from||"");
+    if(c) return c;
+    return statsCmp(a.to||"", b.to||"");
+  });
+  const byDays=sortEdges(allEdgeRows, (a,b)=>{
+    const c=statsCmp(a.last||"9999", b.last||"9999");
+    if(c) return c;
+    if(a.count!==b.count) return b.count-a.count;
+    return statsCmp(a.from||"", b.from||"");
+  });
+  const byLast=sortEdges(allEdgeRows, (a,b)=>{
+    const c=statsCmpDesc(a.last||"", b.last||"");
+    if(c) return c;
+    return statsCmpDesc(a.from||"", b.from||"");
+  });
+  const byFirst=sortEdges(allEdgeRows, (a,b)=>{
+    const c=statsCmp(a.first||"9999", b.first||"9999");
+    if(c) return c;
+    return statsCmp(a.from||"", b.from||"");
+  });
+  const byFirstNew=sortEdges(allEdgeRows, (a,b)=>{
+    const c=statsCmpDesc(a.first||"", b.first||"");
+    if(c) return c;
+    return statsCmpDesc(a.from||"", b.from||"");
+  });
+  const once=sortEdges(allEdgeRows.filter(r=>r.count===1), (a,b)=>{
+    const c=statsCmp(a.last||"9999", b.last||"9999");
+    if(c) return c;
+    return statsCmp(a.from||"", b.from||"");
+  });
+
+  function comboSort(a, b){
+    if(a.count!==b.count) return b.count-a.count;
+    const c=statsCmp(a.last||"", b.last||"");
+    if(c) return c;
+    return statsCmp(a.from||"", b.from||"");
+  }
+  function splitVehEdge(key){
+    const cut=key.indexOf("\0");
+    const veh=key.slice(0, cut);
+    const ek=key.slice(cut+1);
+    const vi=veh.indexOf(LINE_SEP);
+    const loc=vi<0?"":veh.slice(0, vi);
+    const num=vi<0?veh:veh.slice(vi+1);
+    const ei=ek.indexOf(LINE_SEP);
+    const a=ei<0?ek:ek.slice(0, ei);
+    const b=ei<0?ek:ek.slice(ei+1);
+    const lab=edgeLabel(a, b);
+    return {num:num, loc:loc, from:lab[0], to:lab[1]};
+  }
+  const vehEdgeGt1=[];
+  vehEdge.forEach((c, key)=>{
+    if(c.count<=1) return;
+    const p=splitVehEdge(key);
+    vehEdgeGt1.push({
+      vehicle:p.num, locClass:p.loc, from:p.from, to:p.to,
+      count:c.count, first:c.first, last:c.last, lines:c.lines.size,
+    });
+  });
+  vehEdgeGt1.sort(comboSort);
+  const vehEdgeLineGt1=[];
+  vehEdgeLine.forEach((c, key)=>{
+    if(c.count<=1) return;
+    const cut=key.lastIndexOf("\0");
+    const line=key.slice(cut+1);
+    const p=splitVehEdge(key.slice(0, cut));
+    vehEdgeLineGt1.push({
+      vehicle:p.num, locClass:p.loc, from:p.from, to:p.to, line:line,
+      count:c.count, first:c.first, last:c.last,
+    });
+  });
+  vehEdgeLineGt1.sort(comboSort);
+  const lineEdgeGt1=[];
+  lineEdge.forEach((c, key)=>{
+    if(c.count<=1) return;
+    const cut=key.indexOf("\0");
+    const line=key.slice(0, cut);
+    const ek=key.slice(cut+1);
+    const ei=ek.indexOf(LINE_SEP);
+    const lab=edgeLabel(ek.slice(0, ei), ek.slice(ei+1));
+    lineEdgeGt1.push({
+      line:line, from:lab[0], to:lab[1],
+      count:c.count, first:c.first, last:c.last,
+    });
+  });
+  lineEdgeGt1.sort(comboSort);
+  const locEdgeGt1=[];
+  locEdge.forEach((c, key)=>{
+    if(c.count<=1) return;
+    const cut=key.indexOf("\0");
+    const loc=key.slice(0, cut);
+    const ek=key.slice(cut+1);
+    const ei=ek.indexOf(LINE_SEP);
+    const lab=edgeLabel(ek.slice(0, ei), ek.slice(ei+1));
+    locEdgeGt1.push({
+      locClass:loc, from:lab[0], to:lab[1],
+      count:c.count, first:c.first, last:c.last,
+    });
+  });
+  locEdgeGt1.sort(comboSort);
+  const multi=sortEdges(allEdgeRows.filter(r=>r.uniqueVehicles>1), (a,b)=>{
+    if(a.uniqueVehicles!==b.uniqueVehicles) return b.uniqueVehicles-a.uniqueVehicles;
+    if(a.count!==b.count) return b.count-a.count;
+    return statsCmp(a.from||"", b.from||"");
+  });
+
+  const byStation=[...stationAggs.values()].map(st=>({
+    key:st.name,
+    boarded:st.boarded,
+    alighted:st.alighted,
+    through:st.through,
+    passed:st.passed,
+    total:st.boarded+st.alighted+st.through+st.passed,
+    first:st.first,
+    last:st.last,
+    uniqueLines:st.lines.size,
+  }));
+  byStation.sort((a,b)=>{
+    if(a.total!==b.total) return b.total-a.total;
+    if(a.boarded!==b.boarded) return b.boarded-a.boarded;
+    if(a.alighted!==b.alighted) return b.alighted-a.alighted;
+    if(a.through!==b.through) return b.through-a.through;
+    if(a.passed!==b.passed) return b.passed-a.passed;
+    return statsCmp(a.key||"", b.key||"");
+  });
+
+  let stationsBoarded=0, stationsAlighted=0, stationsThrough=0, stationsPassed=0;
+  stationAggs.forEach(st=>{
+    if(st.boarded) stationsBoarded++;
+    if(st.alighted) stationsAlighted++;
+    if(st.through) stationsThrough++;
+    if(st.passed) stationsPassed++;
+  });
+  const edgesRepeat=allEdgeRows.reduce((n,r)=>n+(r.count>1?1:0), 0);
+
+  return {
+    extra:{
+      lines:byLine.length,
+      locClasses:byLoc.length,
+      vehicles:byVeh.length,
+      tagLocPct:statsRound1(100*tripsWithLoc/denom),
+      tagVehPct:statsRound1(100*tripsWithVeh/denom),
+      uniqueLineVehicle:lineVehicle.size,
+      uniqueLineLocClass:lineLoc.size,
+      uniqueVehicleLocClass:vehicleLoc.size,
+      uniqueRoutes:uniqRoutes.size,
+      edges:allEdgeRows.length,
+      edgesRepeat:edgesRepeat,
+      vehEdgeRepeat:vehEdgeGt1.length,
+      stationsBoarded:stationsBoarded,
+      stationsAlighted:stationsAlighted,
+      stationsThrough:stationsThrough,
+      stationsPassed:stationsPassed,
+      minTrip:minTrip,
+      maxTrip:maxTrip,
+      topLine:topLine?{key:topLine.key, km:topLine.distanceKm}:null,
+      topVehicle:topVeh?{key:topVeh.key, locClass:topVeh.locClass||"", km:topVeh.distanceKm}:null,
+    },
+    byLine:byLine,
+    byLocClass:byLoc,
+    byVehicle:byVeh,
+    byStation:byStation,
+    crossLocClassLine:packCross(crosses.crossLocClassLine),
+    crossVehicleLine:packCross(crosses.crossVehicleLine),
+    crossLineMonth:packCross(crosses.crossLineMonth, months),
+    crossLineWeekday:packCross(crosses.crossLineWeekday, STATS_WEEKDAYS),
+    crossLocClassMonth:packCross(crosses.crossLocClassMonth, months),
+    crossLocClassWeekday:packCross(crosses.crossLocClassWeekday, STATS_WEEKDAYS),
+    crossLocClassCategory:packCross(crosses.crossLocClassCategory),
+    crossLineCategory:packCross(crosses.crossLineCategory),
+    crossLineDelay:packCross(crosses.crossLineDelay, STATS_DELAYS),
+    crossLocClassDelay:packCross(crosses.crossLocClassDelay, STATS_DELAYS),
+    crossVehicleMonth:packCross(crosses.crossVehicleMonth, months),
+    edgesByCount:byCount,
+    edgesByDaysSince:byDays,
+    edgesByLast:byLast,
+    edgesByFirst:byFirst,
+    edgesByFirstNew:byFirstNew,
+    edgesOnce:once,
+    vehEdgeGt1:vehEdgeGt1,
+    vehEdgeLineGt1:vehEdgeLineGt1,
+    lineEdgeGt1:lineEdgeGt1,
+    locEdgeGt1:locEdgeGt1,
+    multiVehicleEdges:multi,
+  };
+}
+
 (function(){
   const WD=["Mo","Di","Mi","Do","Fr","Sa","So"];
   function lineColors(){ return D().lineColors||{}; }
@@ -33,6 +610,36 @@
   }
 
   // KPI-Überblick
+  const dateFromEl=document.getElementById("statsDateFrom");
+  const dateToEl=document.getElementById("statsDateTo");
+  const rangeEl=document.getElementById("statsRange");
+  function factsReady(src){
+    const n=(src.trips||[]).length;
+    return !!(src.statEdges && src.statStops
+      && src.statEdges.length===n && src.statStops.length===n);
+  }
+  function tripsInRange(src, from, to){
+    if(!from && !to){
+      const k=src.kpis||{};
+      return k.count!=null?k.count:(src.trips||[]).length;
+    }
+    return (src.trips||[]).reduce((n,t)=>{
+      const d=statsYmd(t);
+      if(!d) return n;
+      if(from && d<from) return n;
+      if(to && d>to) return n;
+      return n+1;
+    }, 0);
+  }
+  function paintStatsRange(src, from, to){
+    if(!rangeEl) return;
+    let span="gesamter Zeitraum";
+    if(from&&to) span=fmtDate(from)+"–"+fmtDate(to);
+    else if(from) span="ab "+fmtDate(from);
+    else if(to) span="bis "+fmtDate(to);
+    const n=tripsInRange(src, from, to);
+    rangeEl.textContent=span+" · "+Number(n).toLocaleString("de-DE")+" Fahrten";
+  }
   let applyStationSort=function(){};
   document.querySelectorAll("[data-station-sort]").forEach(a=>{
     a.addEventListener("click",()=>{
@@ -41,15 +648,23 @@
     });
   });
   function renderStats(){
-  const S=D().stats;
+  const src=D();
+  const kpis=src.kpis||{};
+  bindDateInput(dateFromEl, kpis.first, kpis.last);
+  bindDateInput(dateToEl, kpis.first, kpis.last);
+  const from=dateFromEl?dateFromEl.value:"";
+  const to=dateToEl?dateToEl.value:"";
+  paintStatsRange(src, from, to);
+  const S=(!from && !to)?src.stats:(factsReady(src)?aggregateStats(src, from, to):null);
   if(!S){
     ["stats-extra","stats-lines","stats-loc","stats-veh","stats-stations",
      "stats-edges","stats-repeat","stats-cross"].forEach(id=>{
       const el=document.getElementById(id);
       if(el) el.innerHTML="";
     });
-    document.getElementById("stats-extra").innerHTML=
-      "<p class='hint'>Keine Statistik-Daten vorhanden.</p>";
+    document.getElementById("stats-extra").innerHTML=(from||to)
+      ? "<p class='hint'>Datumsfilter braucht einen neuen Dashboard-Build.</p>"
+      : "<p class='hint'>Keine Statistik-Daten vorhanden.</p>";
     applyStationSort=function(){};
     return;
   }
@@ -538,6 +1153,11 @@
   mountHeatmap(crossEl, S.crossLocClassDelay, "Baureihe × Verspätung", id, id, "stats-cross-loc-delay");
   mountHeatmap(crossEl, S.crossVehicleMonth, "Fahrzeug × Monat", vehLabel, id, "stats-cross-veh-month", {initialLimit:50});
   }
+  [dateFromEl, dateToEl].forEach(el=>{
+    if(!el) return;
+    el.addEventListener("input", renderStats);
+    el.addEventListener("change", renderStats);
+  });
   renderStats();
   onHomeChange(renderStats);
 })();

@@ -10,6 +10,7 @@
   const dateFromEl=document.getElementById("vehDateFrom");
   const dateToEl=document.getElementById("vehDateTo");
   const filterEl=document.getElementById("vehFilter");
+  const hideUnusedEl=document.getElementById("vehHideUnused");
   const headEl=document.getElementById("vehFilterHead");
   const countEl=document.getElementById("vehCount");
   const modal=document.getElementById("vehModal");
@@ -89,29 +90,172 @@
     const s=String(n==null?"":n).trim();
     return /^\d+$/.test(s) ? +s : NaN;
   }
-  /** Markiert Läufe benachbarter Zeilen mit Nummern ±1 (Start/Mitte/Ende). */
-  function markStreaks(rows){
-    const nums=rows.map(r=>vehInt(r.number));
-    rows.forEach(r=>{ r.streak=""; });
-    let i=0;
-    while(i<rows.length){
-      if(isNaN(nums[i])){ i++; continue; }
-      let j=i+1;
-      let step=null;
-      while(j<rows.length && !isNaN(nums[j])){
-        const d=nums[j]-nums[j-1];
-        if(d!==1 && d!==-1) break;
-        if(step===null) step=d;
-        else if(d!==step) break;
-        j++;
-      }
-      if(j-i>=2){
-        rows[i].streak="veh-streak veh-streak-start";
-        for(let k=i+1;k<j-1;k++) rows[k].streak="veh-streak veh-streak-mid";
-        rows[j-1].streak="veh-streak veh-streak-end";
-      }
-      i=j>i ? j : i+1;
+  function rosterTypes(){
+    const box=DATA.vehicleRoster;
+    return (box&&box.types)||{};
+  }
+  function rosterList(locClass){
+    const list=rosterTypes()[locClass];
+    return Array.isArray(list)&&list.length?list:null;
+  }
+  /** Reine Ziffernketten ohne führende Nullen, sonst der Text. */
+  function normKey(n){
+    const s=String(n==null?"":n).trim();
+    return /^\d+$/.test(s)?String(+s):s;
+  }
+  function fmtIsoDay(iso){
+    const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso||""));
+    return m?m[3]+"."+m[2]+"."+m[1]:"";
+  }
+  function rosterHit(list, number){
+    if(!list) return null;
+    const key=normKey(number);
+    for(let i=0;i<list.length;i++){
+      if(normKey(list[i].number)===key) return list[i];
     }
+    return null;
+  }
+  function applyRoster(row){
+    row.withdrawn=false;
+    row.withdrawnOn="";
+    const hit=rosterHit(rosterList(row.locClass), row.number);
+    if(!hit||!hit.withdrawn) return;
+    row.withdrawn=true;
+    row.withdrawnOn=hit.withdrawnOn||"";
+  }
+  function coverageFor(locClass, rides){
+    const list=rosterList(locClass);
+    if(!list) return null;
+    const active=list.filter(v=>!v.withdrawn);
+    if(!active.length) return null;
+    const ridden=new Set();
+    (rides||[]).forEach(r=>{
+      if((r.locClass||"")!==locClass) return;
+      ridden.add(normKey(r.vehicleNumber));
+    });
+    const hit=active.filter(v=>ridden.has(normKey(v.number))).length;
+    const total=active.length;
+    return {hit, total, pct:Math.round(100*hit/total)};
+  }
+  /**
+   * Goldrand: ohne Fuhrpark benachbarte Zeilen mit Nummern ±1.
+   * Mit Fuhrpark zählen nur gefahrene, nicht ausgemusterte Nummern.
+   * Eine Lücke, die nur aus ausgemusterten Nummern besteht, verbindet sie;
+   * die ausgemusterte Zeile bekommt den durchgehenden Strich.
+   */
+  function markStreaks(rows){
+    rows.forEach(r=>{ r.streak=""; });
+    const rosterInGroup=rows.some(r=>rosterList(r.locClass));
+    if(!rosterInGroup){
+      const nums=rows.map(r=>vehInt(r.number));
+      let i=0;
+      while(i<rows.length){
+        if(isNaN(nums[i])){ i++; continue; }
+        let j=i+1;
+        let step=null;
+        while(j<rows.length && !isNaN(nums[j])){
+          const d=nums[j]-nums[j-1];
+          if(d!==1 && d!==-1) break;
+          if(step===null) step=d;
+          else if(d!==step) break;
+          j++;
+        }
+        if(j-i>=2){
+          rows[i].streak="veh-streak veh-streak-start";
+          for(let k=i+1;k<j-1;k++) rows[k].streak="veh-streak veh-streak-mid";
+          rows[j-1].streak="veh-streak veh-streak-end";
+        }
+        i=j>i ? j : i+1;
+      }
+      return;
+    }
+    const members=[];
+    rows.forEach((row,idx)=>{
+      const n=vehInt(row.number);
+      if(row.withdrawn||!(row.count>0)||isNaN(n)) return;
+      members.push({idx, n, row});
+    });
+    const activeCache=new Map();
+    const withdrawnCache=new Map();
+    function intsFor(locClass){
+      if(activeCache.has(locClass)) return;
+      const active=new Set();
+      const withdrawn=new Set();
+      (rosterList(locClass)||[]).forEach(v=>{
+        const n=vehInt(v.number);
+        if(isNaN(n)) return;
+        if(v.withdrawn) withdrawn.add(n);
+        else active.add(n);
+      });
+      rows.forEach(r=>{
+        if((r.locClass||"")!==locClass||r.withdrawn) return;
+        const n=vehInt(r.number);
+        if(!isNaN(n)) active.add(n);
+      });
+      activeCache.set(locClass, active);
+      withdrawnCache.set(locClass, withdrawn);
+    }
+    function gapOnlyWithdrawn(a, b, locClass){
+      intsFor(locClass);
+      const active=activeCache.get(locClass);
+      const withdrawn=withdrawnCache.get(locClass);
+      const lo=Math.min(a,b), hi=Math.max(a,b);
+      if(hi===lo) return false;
+      for(let n=lo+1;n<hi;n++){
+        if(active.has(n)||!withdrawn.has(n)) return false;
+      }
+      return true;
+    }
+    function connects(a, b, step){
+      const d=b.n-a.n;
+      if(!d) return null;
+      const dir=d>0?1:-1;
+      if(step!==null && dir!==step) return null;
+      const locA=a.row.locClass||"";
+      const locB=b.row.locClass||"";
+      if(!rosterList(locA) && !rosterList(locB)){
+        if(b.idx!==a.idx+1||(d!==1 && d!==-1)) return null;
+        return dir;
+      }
+      if(locA!==locB||!gapOnlyWithdrawn(a.n, b.n, locA)) return null;
+      return dir;
+    }
+    function closeRun(run){
+      if(run.length<2) return;
+      run[0].row.streak="veh-streak veh-streak-start";
+      for(let k=1;k<run.length-1;k++) run[k].row.streak="veh-streak veh-streak-mid";
+      run[run.length-1].row.streak="veh-streak veh-streak-end";
+      const lo=Math.min(run[0].idx, run[run.length-1].idx);
+      const hi=Math.max(run[0].idx, run[run.length-1].idx);
+      let nLo=run[0].n, nHi=run[0].n;
+      run.forEach(m=>{
+        if(m.n<nLo) nLo=m.n;
+        if(m.n>nHi) nHi=m.n;
+      });
+      const loc=run[0].row.locClass||"";
+      for(let i=lo+1;i<hi;i++){
+        const r=rows[i];
+        if(r.streak||!r.withdrawn||(r.locClass||"")!==loc) continue;
+        const n=vehInt(r.number);
+        if(!isNaN(n) && n>nLo && n<nHi)
+          r.streak="veh-streak veh-streak-through";
+      }
+    }
+    let run=[];
+    let step=null;
+    members.forEach(member=>{
+      if(!run.length){ run=[member]; step=null; return; }
+      const dir=connects(run[run.length-1], member, step);
+      if(dir===null){
+        closeRun(run);
+        run=[member];
+        step=null;
+        return;
+      }
+      if(step===null) step=dir;
+      run.push(member);
+    });
+    closeRun(run);
   }
 
   function lineColLabel(key, lines){
@@ -121,9 +265,12 @@
     const op=lineOperator(key);
     return op?name+" ("+op+")":name;
   }
-  function groupTitle(name, nVeh, nRides, km){
-    return name+" · "+nVeh+" "+(nVeh===1?"Fahrzeug":"Fahrzeuge")+
+  function groupTitle(name, nVeh, nRides, km, coverage){
+    let title=name+" · "+nVeh+" "+(nVeh===1?"Fahrzeug":"Fahrzeuge")+
       " · ×"+nRides+" · "+km+" km";
+    if(coverage&&coverage.total)
+      title+=" · "+coverage.hit+"/"+coverage.total+" ("+coverage.pct+"%)";
+    return title;
   }
   function selectText(el){
     const opt=el.selectedOptions&&el.selectedOptions[0];
@@ -151,6 +298,7 @@
     else if(to) parts.push("bis "+fmtDate(to));
     const q=filterEl.value.trim();
     if(q) parts.push("Suche "+q);
+    if(hideUnusedEl&&hideUnusedEl.checked) parts.push("ohne unbenutzte");
     const label=parts.length ? parts.join(" · ") : "Alle";
     return "Fahrzeuge · Eingestellte Filter: "+label;
   }
@@ -159,6 +307,7 @@
     const op=opEl.value, cat=catEl.value;
     const q=filterEl.value.toLowerCase().trim();
     const shows=selectedShows();
+    const hasRoster=Object.keys(rosterTypes()).length>0;
     const filtered=V.filter(r=>{
       if(op!=="__all__" && r.operator!==op) return false;
       if(cat!=="__all__" && r.category!==cat) return false;
@@ -166,14 +315,20 @@
       if(q && !((r.vehicleNumber+" "+lineName(r.line)).toLowerCase().includes(q))) return false;
       return true;
     });
-    if(!V.length) return {kind:"empty", shows, filtered};
-    if(!filtered.length) return {kind:"none", shows, filtered};
+    if(!V.length && !hasRoster) return {kind:"empty", shows, filtered};
+    if(!filtered.length && !(groupDim==="locClass" && hasRoster))
+      return {kind:"none", shows, filtered};
     const buckets=new Map();
     filtered.forEach(r=>{
       const g=groupDim==="locClass" ? (r.locClass||"Unbekannt") : catLabel(r.category);
       if(!buckets.has(g)) buckets.set(g,[]);
       buckets.get(g).push(r);
     });
+    if(groupDim==="locClass"){
+      Object.keys(rosterTypes()).forEach(name=>{
+        if(!buckets.has(name)) buckets.set(name,[]);
+      });
+    }
     const showClass=groupDim!=="locClass";
     const groups=[];
     let totalVeh=0;
@@ -181,32 +336,61 @@
       const recs=buckets.get(gname);
       const rowMap=new Map();
       const lineSet=new Set();
+      function rowKey(loc, num){
+        const locName=loc||"";
+        return rosterList(locName)?locName+"|"+normKey(num):locName+"|"+num;
+      }
       recs.forEach(r=>{
-        const key=r.locClass+"|"+r.vehicleNumber;
-        if(!rowMap.has(key)) rowMap.set(key,{number:r.vehicleNumber,locClass:r.locClass,recs:[]});
+        const key=rowKey(r.locClass, r.vehicleNumber);
+        if(!rowMap.has(key)) rowMap.set(key,{
+          number:r.vehicleNumber, locClass:r.locClass||"", recs:[],
+          withdrawn:false, withdrawnOn:"",
+        });
         rowMap.get(key).recs.push(r);
         if(r.line) lineSet.add(r.line);
       });
+      if(groupDim==="locClass"){
+        (rosterList(gname)||[]).forEach(v=>{
+          const key=gname+"|"+normKey(v.number);
+          if(rowMap.has(key)) return;
+          rowMap.set(key,{
+            number:v.number, locClass:gname, recs:[],
+            withdrawn:!!v.withdrawn,
+            withdrawnOn:v.withdrawn&&v.withdrawnOn?v.withdrawnOn:"",
+          });
+        });
+      }
       const lines=[...lineSet].sort((a,b)=>
         lineName(a).localeCompare(lineName(b),undefined,{numeric:true})
         || String(a).localeCompare(String(b)));
       const rowArr=[...rowMap.values()];
       rowArr.forEach(row=>{
+        applyRoster(row);
         const ds=row.recs.map(r=>r.date).filter(Boolean).sort();
         row.first=ds[0]||""; row.last=ds[ds.length-1]||"";
         row.count=row.recs.length;
         row.km=Math.round(row.recs.reduce((s,r)=>s+(r.distanceKm||0),0)*10)/10;
       });
-      rowArr.sort(rowCmp);
-      markStreaks(rowArr);
-      totalVeh+=rowArr.length;
+      let visible=rowArr;
+      if(q) visible=rowArr.filter(row=>
+        row.recs.length||String(row.number).toLowerCase().includes(q));
+      if(hideUnusedEl&&hideUnusedEl.checked)
+        visible=visible.filter(row=>row.count>0);
+      if(!visible.length) return;
+      visible.sort(rowCmp);
+      markStreaks(visible);
+      const ridden=visible.filter(row=>row.count>0).length;
+      totalVeh+=ridden;
       const groupKm=Math.round(recs.reduce((s,r)=>s+(r.distanceKm||0),0)*10)/10;
+      const coverage=groupDim==="locClass"?coverageFor(gname, recs):null;
       groups.push({
         name:gname,
-        title:groupTitle(gname, rowArr.length, recs.length, groupKm),
-        lines, rows:rowArr, km:groupKm,
+        title:groupTitle(gname, ridden, recs.length, groupKm, coverage),
+        lines, rows:visible, km:groupKm,
+        roster:groupDim==="locClass"&&!!rosterList(gname),
       });
     });
+    if(!groups.length) return {kind:"none", shows, filtered};
     return {kind:"ok", shows, showClass, filtered, totalVeh, groups};
   }
 
@@ -217,13 +401,17 @@
     return head+"\n\n"+view.groups.map(g=>{
       const headers=["Wagen"];
       if(view.showClass) headers.push("Baureihe");
+      const showRetired=g.roster||g.rows.some(row=>row.withdrawn);
+      if(showRetired) headers.push("Ausgemustert");
       headers.push("zuerst","zuletzt","Fahrten","km");
       g.lines.forEach(l=>headers.push(lineColLabel(l, g.lines)));
       const lines=[g.title, headers.join("\t")];
       g.rows.forEach(row=>{
         const cells=[row.number];
         if(view.showClass) cells.push(row.locClass||"");
-        cells.push(fmtDate(row.first), fmtDate(row.last), row.count, row.km);
+        if(showRetired)
+          cells.push(row.withdrawn?(fmtIsoDay(row.withdrawnOn)||"ja"):"");
+        cells.push(row.first?fmtDate(row.first):"—", row.last?fmtDate(row.last):"—", row.count, row.km);
         g.lines.forEach(l=>{
           const cr=row.recs.filter(x=>x.line===l);
           cells.push(cr.length?cellText(cr, view.shows):"");
@@ -275,12 +463,17 @@
           return `<td class="has"${tint} data-ci="${ci}">${cellText(cr,shows)}</td>`;
         }).join("");
         const streakCls=row.streak?` ${row.streak}`:"";
-        return `<tr class="veh">
+        const withdrawnCls=row.withdrawn?" veh-withdrawn":"";
+        const dateBit=row.withdrawnOn
+          ?` <span class="muted">· ausgem. ${esc(fmtIsoDay(row.withdrawnOn))}</span>`:"";
+        const stats=row.count
+          ?`<span class="muted veh-stats">×${row.count} · ${row.km} km</span>`:"";
+        return `<tr class="veh${withdrawnCls}">
           <td class="sticky lbl${streakCls}">${esc(row.number)}`+
-          `<span class="muted veh-stats">×${row.count} · ${row.km} km</span></td>
+          dateBit+stats+`</td>
           ${showClass?`<td class="lbl">${esc(row.locClass||"—")}</td>`:''}
-          <td class="lbl">${fmtDate(row.first)}</td>
-          <td class="lbl">${fmtDate(row.last)}</td>
+          <td class="lbl">${row.first?fmtDate(row.first):"—"}</td>
+          <td class="lbl">${row.last?fmtDate(row.last):"—"}</td>
           ${cells}</tr>`;
       }).join("");
       html+=`<div class="matrix-wrap"><h3>${esc(g.title)}</h3>`+
@@ -325,6 +518,7 @@
     el.oninput=renderMatrices;
   });
   filterEl.oninput=renderMatrices;
+  if(hideUnusedEl) hideUnusedEl.onchange=renderMatrices;
   const copyBtn=document.getElementById("vehCopy");
   if(copyBtn) copyBtn.onclick=()=>copyText(vehiclesTsv(buildView()), copyBtn);
   document.querySelectorAll('input[name="vehShow"]').forEach(el=>{

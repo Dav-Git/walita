@@ -37,6 +37,7 @@ from line_color_patches import load_patches as load_line_color_patches
 from line_color_patches import status_id as color_status_id
 from line_color_patches import to_css_pair
 from home_region import filter_statuses, load_operators
+from vehicle_roster import load_roster
 from station_patches import apply_station_patches
 from station_patches import load_patches as load_station_patches
 from version import __version__
@@ -948,6 +949,11 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
     # [date, lineKey, locClass, km, [[sid, rollenBits], ...]]
     line_rides = []
     line_stop_names = {}
+    # Parallel zu `trips` für den Datumsfilter der Statistikseite.
+    # Kanten: [[fromId, toId], ...] je Fahrt (nach Via-Patches).
+    # Stationen: [[sid, rollenBits], ...] — 1 Ein, 2 Aus, 4 gehalten, 8 physisch.
+    stat_edges = []
+    stat_stops = []
     trips_with_loc = 0
     trips_with_veh = 0
     min_trip = None  # {line, from, to, km, date}
@@ -1004,6 +1010,20 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
 
     for status in statuses:
         ride_bits.clear()
+        trip_edges = []
+        trip_stop_bits = {}
+        trip_stop_order = []
+
+        def note_stop(sid, bit):
+            if sid is None:
+                return
+            cur = trip_stop_bits.get(sid)
+            if cur is None:
+                trip_stop_order.append(sid)
+                trip_stop_bits[sid] = bit
+            else:
+                trip_stop_bits[sid] = cur | bit
+
         checkin = status.get("checkin") or {}
         origin = checkin.get("origin") or {}
         destination = checkin.get("destination") or {}
@@ -1144,6 +1164,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
                 get_station(
                     sid, name or edge_names.get(sid) or str(sid)
                 ).add_through(date_str, line=lk)
+                note_stop(sid, 4)
                 mark_held_node(sid)
                 mark_line_role(sid, lk, "through")
 
@@ -1153,6 +1174,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
                     mark_held_once(sid0, name0)
                 else:
                     get_station(sid0, name0).add_boarded(date_str, line=lk)
+                    note_stop(sid0, 1)
                     mark_used_node(sid0)
                     mark_line_role(sid0, lk, "boarded")
                 if lk:
@@ -1164,6 +1186,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
                         mark_held_once(sid0, name0)
                     else:
                         get_station(sid0).add_alighted(date_str, line=lk)
+                        note_stop(sid0, 2)
                         mark_line_role(sid0, lk, "alighted")
                         if dubi_start:
                             mark_used_node(sid0)
@@ -1176,6 +1199,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
                         mark_held_once(sidn, namen)
                     else:
                         get_station(sidn, namen).add_alighted(date_str, line=lk)
+                        note_stop(sidn, 2)
                         mark_line_role(sidn, lk, "alighted")
                         if sidn != sid0 or dubi_start:
                             mark_used_node(sidn)
@@ -1216,6 +1240,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             get_station(
                 sid, s.get("name") or edge_names.get(sid) or str(sid)
             ).add_pass(date_str, line=lk)
+            note_stop(sid, 8)
             mark_pass_node(sid)
             mark_line_role(sid, lk, "passed")
             if lk:
@@ -1238,6 +1263,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             get_edge(a_id, b_id, a_name, b_name).add(
                 date_str, line=lk, loc_class=loc_class, vehicles=veh_ids
             )
+            trip_edges.append([a_id, b_id])
             if lk:
                 _get_dated(line_edge, (lk, a_id, b_id)).add(date_str)
             if loc_class:
@@ -1302,6 +1328,10 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             for s in segment
         ]
 
+        stat_edges.append(trip_edges)
+        stat_stops.append(
+            [[sid, trip_stop_bits[sid]] for sid in trip_stop_order]
+        )
         trips.append(
             {
                 "date": dep,
@@ -2105,6 +2135,16 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
         "lines": line_catalog,
         "lineRides": line_rides,
         "lineStopNames": line_stop_names,
+        "statEdges": stat_edges,
+        "statStops": stat_stops,
+        "statEdgeNames": {
+            f"{a_id}{LINE_SEP}{b_id}": [e.from_name, e.to_name]
+            for (a_id, b_id), e in edge_aggs.items()
+        },
+        "statStopNames": {
+            str(sid): (a.name or str(sid))
+            for sid, a in station_aggs.items()
+        },
         "lineColors": line_colors,
         "stations": map_stations,
         "variants": variants,
@@ -2228,6 +2268,11 @@ def main(argv=None):
         help="Lokale Einstiegs-Patches je Status "
              "(Default: data/boarding_patches.json; fehlende Datei = keine Änderung).",
     )
+    parser.add_argument(
+        "--vehicle-roster", default="data/vehicle_roster.json",
+        help="Lokaler Fuhrpark je Baureihe "
+             "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -2306,6 +2351,15 @@ def main(argv=None):
         log(f"Einstiegs-Patches: {n_board} Einträge aus {args.boarding_patches}.")
     elif os.path.isfile(args.boarding_patches):
         log(f"Einstiegs-Patches: {args.boarding_patches} ist leer.")
+    vehicle_roster = load_roster(args.vehicle_roster)
+    n_roster_types = len(vehicle_roster.get("types") or {})
+    n_roster = sum(len(v) for v in (vehicle_roster.get("types") or {}).values())
+    if n_roster:
+        log(f"Fuhrpark: {n_roster} Nummern in {n_roster_types} Baureihen "
+            f"aus {args.vehicle_roster}.")
+    elif os.path.isfile(args.vehicle_roster):
+        log(f"Fuhrpark: {args.vehicle_roster} enthält keine Nummern.")
+
     edge_measures = None
     if n_board:
         measure_statuses = statuses
@@ -2340,6 +2394,8 @@ def main(argv=None):
         )
         log(f"Heimatregion: {data['home']['kpis']['count']} von "
             f"{data['kpis']['count']} Fahrten.")
+    if n_roster:
+        data["vehicleRoster"] = vehicle_roster
     log(f"Ausgewertet: {data['kpis']['count']} Fahrten, {len(data['edges'])} Karten-Kanten, "
         f"{len(data['segments'])} Segmente.")
 

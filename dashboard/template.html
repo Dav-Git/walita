@@ -124,6 +124,11 @@
         <h2>Statistiken</h2>
         <p>Linien, Baureihen, Fahrzeuge und Stationen – Rankings, Unique-Kombis und Kreuztabellen.</p>
       </div>
+      <div class="toolbar">
+        <label class="ctl">Von <input type="date" id="statsDateFrom"></label>
+        <label class="ctl">Bis <input type="date" id="statsDateTo"></label>
+        <span class="muted" id="statsRange"></span>
+      </div>
       <div id="stats-extra" class="stats-sec"></div>
       <div id="stats-lines" class="stats-sec"></div>
       <div id="stats-loc" class="stats-sec"></div>
@@ -220,7 +225,7 @@
     <section id="vehicles" class="tab">
       <div class="tab-head">
         <h2>Fahrzeuge</h2>
-        <p>Getaggte Wagennummern je Baureihe/Kategorie und Linie.</p>
+        <p>Getaggte Wagennummern je Baureihe/Kategorie und Linie. Mit Fuhrpark jede definierte Nummer und die Abdeckung.</p>
       </div>
       <h3 id="vehFilterHead" class="map-filter-head">Eingestellte Filter</h3>
       <div class="toolbar">
@@ -235,6 +240,7 @@
         <label class="ctl">Von <input type="date" id="vehDateFrom"></label>
         <label class="ctl">Bis <input type="date" id="vehDateTo"></label>
         <input type="search" id="vehFilter" placeholder="Suche (Wagennr., Linie …)">
+        <label class="ctl"><input type="checkbox" id="vehHideUnused"> Nicht benutzte ausblenden</label>
         <span class="ctl ctl-checks">Anzeige
           <label><input type="checkbox" name="vehShow" value="date" checked> Datum</label>
           <label><input type="checkbox" name="vehShow" value="count"> Häufigkeit</label>

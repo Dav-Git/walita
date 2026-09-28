@@ -26,6 +26,37 @@ function bindDateInput(el, first, last){
   if(first) el.min=first;
   el.max=datePickerMax(last);
 }
+function attachDateClears(){
+  if(typeof document==="undefined") return;
+  const proto=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+  document.querySelectorAll('input[type="date"]').forEach(input=>{
+    if(input.dataset.dateClear) return;
+    input.dataset.dateClear="1";
+    const btn=document.createElement("button");
+    btn.type="button";
+    btn.className="date-clear";
+    btn.setAttribute("aria-label", "Datum löschen");
+    btn.textContent="×";
+    input.insertAdjacentElement("afterend", btn);
+    function sync(){ btn.disabled=!proto.get.call(input); }
+    Object.defineProperty(input, "value", {
+      configurable:true,
+      get(){ return proto.get.call(input); },
+      set(v){ proto.set.call(input, v); sync(); },
+    });
+    input.addEventListener("input", sync);
+    input.addEventListener("change", sync);
+    btn.addEventListener("click", ()=>{
+      if(!proto.get.call(input)) return;
+      proto.set.call(input, "");
+      sync();
+      input.dispatchEvent(new Event("input", {bubbles:true}));
+      input.dispatchEvent(new Event("change", {bubbles:true}));
+    });
+    sync();
+  });
+}
+attachDateClears();
 
 // Interner Linien-Schlüssel = Name + \\x1f + Operator; Anzeige nur der Name.
 const LINE_SEP="\x1f";

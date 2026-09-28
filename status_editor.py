@@ -5,7 +5,7 @@
 
 Die Fahrtliste zeigt Baureihe und Fahrzeugnummer direkt; Zellen werden lokal
 gestagt. Speichern schreibt den Diff live auf den Server. Laufweg/`trip`
-bleibt unangetastet. Linienfarbe, Einstieg und Heimatregion sind lokale Overlays (kein API-Write).
+bleibt unangetastet. Linienfarbe, Einstieg, Heimatregion und Fuhrpark sind lokale Overlays (kein API-Write).
 
 Auth wie der Export, aber mit Scope `write-statuses` zusätzlich zu
 `read-statuses`.
@@ -34,6 +34,7 @@ import download_statuses as dl
 import edge_patches as ep
 import home_region as hr
 import line_color_patches as lcp
+import vehicle_roster as vr
 import station_patches as sp
 from version import __version__
 
@@ -806,6 +807,334 @@ class BoardingDialog(tk.Toplevel):
         self.destroy()
 
 
+class _WithdrawnDateDialog(tk.Toplevel):
+    """Optionales Ausmusterungsdatum. result = YYYY-MM-DD, \"\" oder None."""
+
+    def __init__(self, master, initial):
+        super().__init__(master)
+        self.title("Ausmusterungsdatum")
+        self.transient(master)
+        self.result = None
+        self.resizable(False, False)
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(
+            frm, text="Datum (JJJJ-MM-TT). Leer lassen, wenn es unbekannt ist.",
+        ).pack(anchor="w")
+        self.var = tk.StringVar(value=initial or "")
+        entry = ttk.Entry(frm, textvariable=self.var, width=16)
+        entry.pack(anchor="w", pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Abbrechen", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+        entry.focus_set()
+        entry.selection_range(0, "end")
+
+    def _ok(self):
+        text = self.var.get().strip()
+        if not text:
+            self.result = ""
+            self.destroy()
+            return
+        parsed = vr.parse_withdrawn_on(text)
+        if not parsed:
+            messagebox.showerror(
+                "Ausmusterungsdatum",
+                "Bitte JJJJ-MM-TT angeben oder das Feld leer lassen.",
+                parent=self,
+            )
+            return
+        self.result = parsed
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class VehicleRosterDialog(tk.Toplevel):
+    """Nummern je Baureihe. result = {Baureihe: [Einträge]} oder None."""
+
+    def __init__(self, master, roster, class_names):
+        super().__init__(master)
+        self.title("Fuhrpark")
+        self.transient(master)
+        self.result = None
+        self.minsize(560, 520)
+        self.roster = {}
+        types = (roster or {}).get("types") or {}
+        for name, entries in types.items():
+            self.roster[name] = [dict(entry) for entry in entries]
+        known = list(class_names or [])
+        known.extend(self.roster.keys())
+        self._class_names = vr.collect_loc_classes([], known)
+        self.current = None
+        self._vehicles = []
+        self._loading = False
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(
+            frm,
+            text="Je Baureihe die konkreten Fahrzeugnummern. "
+                 "Ausgemusterte zählen nicht zur Abdeckung und nicht zum Goldrand. "
+                 "Das Datum ist optional.",
+            wraplength=520,
+        ).pack(anchor="w")
+
+        class_row = ttk.Frame(frm)
+        class_row.pack(fill="x", pady=(8, 6))
+        ttk.Label(class_row, text="Baureihe").pack(side="left")
+        self.class_var = tk.StringVar()
+        self.class_box = ttk.Combobox(
+            class_row, textvariable=self.class_var, values=self._class_names,
+        )
+        self.class_box.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.class_box.bind("<<ComboboxSelected>>", self._on_class)
+        self.class_box.bind("<Return>", self._on_class)
+        self.class_box.bind("<FocusOut>", self._on_class)
+
+        tree_fr = ttk.Frame(frm)
+        tree_fr.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            tree_fr, columns=("number", "status", "date"), show="headings",
+            selectmode="browse", height=14,
+        )
+        self.tree.heading("number", text="Nummer")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("date", text="Ausgemustert am")
+        self.tree.column("number", width=120)
+        self.tree.column("status", width=120)
+        self.tree.column("date", width=140)
+        scroll = ttk.Scrollbar(tree_fr, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._update_buttons())
+        self.tree.bind("<Double-1>", lambda _e: self._toggle())
+
+        row_btns = ttk.Frame(frm)
+        row_btns.pack(fill="x", pady=(6, 0))
+        self.toggle_btn = ttk.Button(
+            row_btns, text="Ausgemustert umschalten", command=self._toggle,
+        )
+        self.toggle_btn.pack(side="left")
+        self.date_btn = ttk.Button(
+            row_btns, text="Datum…", command=self._set_date,
+        )
+        self.date_btn.pack(side="left", padx=6)
+        self.delete_btn = ttk.Button(
+            row_btns, text="Löschen", command=self._delete,
+        )
+        self.delete_btn.pack(side="left")
+
+        range_row = ttk.Frame(frm)
+        range_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(range_row, text="Von").pack(side="left")
+        self.from_var = tk.StringVar()
+        ttk.Entry(range_row, textvariable=self.from_var, width=8).pack(
+            side="left", padx=(4, 8)
+        )
+        ttk.Label(range_row, text="Bis").pack(side="left")
+        self.to_var = tk.StringVar()
+        ttk.Entry(range_row, textvariable=self.to_var, width=8).pack(
+            side="left", padx=(4, 8)
+        )
+        ttk.Label(range_row, text="Schritt").pack(side="left")
+        self.step_var = tk.StringVar(value="1")
+        ttk.Entry(range_row, textvariable=self.step_var, width=6).pack(
+            side="left", padx=(4, 8)
+        )
+        ttk.Button(range_row, text="Hinzufügen", command=self._add_range).pack(
+            side="left"
+        )
+
+        self.info_var = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.info_var).pack(anchor="w", pady=(6, 0))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Abbrechen", command=self._cancel).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text="Speichern", command=self._ok).pack(side="right")
+
+        initial = ""
+        for name in self._class_names:
+            if self.roster.get(name):
+                initial = name
+                break
+        if not initial and self._class_names:
+            initial = self._class_names[0]
+        self._loading = True
+        self.class_var.set(initial)
+        self._loading = False
+        self._show_class(initial, store=False)
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+        self.class_box.focus_set()
+
+    def _on_class(self, _event=None):
+        if self._loading:
+            return
+        name = self.class_var.get().strip()
+        if name == (self.current or ""):
+            return
+        self._show_class(name, store=True)
+
+    def _show_class(self, name, store):
+        name = (name or "").strip()
+        if store:
+            self._store_current()
+        self.current = name or None
+        if name and name not in self._class_names:
+            self._class_names = vr.collect_loc_classes([], self._class_names + [name])
+            self.class_box.configure(values=self._class_names)
+        self._vehicles = [dict(entry) for entry in self.roster.get(name, [])] if name else []
+        self._fill_tree()
+
+    def _store_current(self):
+        if not self.current:
+            return
+        if self._vehicles:
+            self.roster[self.current] = [dict(entry) for entry in self._vehicles]
+        else:
+            self.roster.pop(self.current, None)
+
+    def _fill_tree(self):
+        self.tree.delete(*self.tree.get_children())
+        for index, entry in enumerate(self._vehicles):
+            status = "ausgemustert" if entry.get("withdrawn") else "aktiv"
+            date = entry.get("withdrawnOn") or ""
+            self.tree.insert(
+                "", "end", iid=str(index),
+                values=(entry["number"], status, date),
+            )
+        self._update_buttons()
+
+    def _selected_index(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        try:
+            return int(sel[0])
+        except (TypeError, ValueError):
+            return None
+
+    def _update_buttons(self):
+        index = self._selected_index()
+        has = index is not None
+        self.toggle_btn.configure(state="normal" if has else "disabled")
+        self.delete_btn.configure(state="normal" if has else "disabled")
+        withdrawn = has and self._vehicles[index].get("withdrawn")
+        self.date_btn.configure(state="normal" if withdrawn else "disabled")
+
+    def _remember_selection(self, index):
+        if index is None or index >= len(self._vehicles):
+            return
+        iid = str(index)
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        self.tree.see(iid)
+        self._update_buttons()
+
+    def _toggle(self):
+        index = self._selected_index()
+        if index is None or not self.current:
+            return
+        entry = self._vehicles[index]
+        entry["withdrawn"] = not entry.get("withdrawn")
+        if not entry["withdrawn"]:
+            entry.pop("withdrawnOn", None)
+        self._store_current()
+        self._fill_tree()
+        self._remember_selection(index)
+
+    def _set_date(self):
+        index = self._selected_index()
+        if index is None or not self.current:
+            return
+        entry = self._vehicles[index]
+        if not entry.get("withdrawn"):
+            return
+        dlg = _WithdrawnDateDialog(self, entry.get("withdrawnOn") or "")
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        if dlg.result:
+            entry["withdrawnOn"] = dlg.result
+        else:
+            entry.pop("withdrawnOn", None)
+        self._store_current()
+        self._fill_tree()
+        self._remember_selection(index)
+
+    def _delete(self):
+        index = self._selected_index()
+        if index is None or not self.current:
+            return
+        del self._vehicles[index]
+        self._store_current()
+        self._fill_tree()
+        if self._vehicles:
+            self._remember_selection(min(index, len(self._vehicles) - 1))
+
+    def _parse_bound(self, text, label):
+        text = (text or "").strip()
+        if not text.isdigit():
+            raise ValueError("%s muss eine ganze Zahl ab 0 sein." % label)
+        return int(text)
+
+    def _add_range(self):
+        name = self.class_var.get().strip()
+        if not name:
+            messagebox.showerror(
+                "Fuhrpark", "Zuerst eine Baureihe angeben.", parent=self,
+            )
+            return
+        if name != (self.current or ""):
+            self._show_class(name, store=True)
+        try:
+            start = self._parse_bound(self.from_var.get(), "Von")
+            end = self._parse_bound(self.to_var.get(), "Bis")
+            step = self._parse_bound(self.step_var.get() or "1", "Schrittweite")
+            numbers = vr.expand_range(start, end, step)
+        except ValueError as exc:
+            messagebox.showerror("Fuhrpark", str(exc), parent=self)
+            return
+        before = len(self._vehicles)
+        self._vehicles = vr.add_numbers(self._vehicles, numbers)
+        added = len(self._vehicles) - before
+        self._store_current()
+        self._fill_tree()
+        self.info_var.set(
+            "%d Nummern in der Spanne, %d neu." % (len(numbers), added)
+        )
+
+    def _ok(self):
+        self._store_current()
+        self.result = {
+            name: entries
+            for name, entries in self.roster.items()
+            if entries
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class EditorApp:
     def __init__(self, root, token, username, statuses, statuses_path, limit, since,
                  stations_path="data/stations.json", dashboard_path="data/dashboard.html",
@@ -814,7 +1143,8 @@ class EditorApp:
                  station_patches_path="data/station_patches.json",
                  line_color_patches_path="data/line_color_patches.json",
                  home_region_path="data/home_region.json",
-                 boarding_patches_path="data/boarding_patches.json"):
+                 boarding_patches_path="data/boarding_patches.json",
+                 vehicle_roster_path="data/vehicle_roster.json"):
         self.root = root
         self.token = token
         self.username = username
@@ -829,6 +1159,7 @@ class EditorApp:
         self.line_color_patches_path = line_color_patches_path
         self.home_region_path = home_region_path
         self.boarding_patches_path = boarding_patches_path
+        self.vehicle_roster_path = vehicle_roster_path
         self.patches = ep.load_patches(edge_patches_path)
         self.station_patches = sp.load_patches(station_patches_path)
         self.line_color_patches = lcp.load_patches(line_color_patches_path)
@@ -1088,6 +1419,10 @@ class EditorApp:
             act, text="Heimatregion…", command=self._open_home_region
         )
         self.home_btn.pack(side="left", padx=8)
+        self.roster_btn = ttk.Button(
+            act, text="Fuhrpark…", command=self._open_vehicle_roster
+        )
+        self.roster_btn.pack(side="left", padx=8)
         ttk.Label(
             act, text="Speichern sendet gestagte Änderungen nach Träwelling"
         ).pack(side="left")
@@ -1118,6 +1453,8 @@ class EditorApp:
             self.station_map_btn.configure(state=state)
         if hasattr(self, "home_btn"):
             self.home_btn.configure(state=state)
+        if hasattr(self, "roster_btn"):
+            self.roster_btn.configure(state=state)
         if hasattr(self, "board_pick_btn"):
             if busy:
                 self.board_pick_btn.configure(state="disabled")
@@ -2058,6 +2395,27 @@ class EditorApp:
             "Dashboard neu bauen, damit der Filter sie nutzt."
         )
 
+    def _open_vehicle_roster(self):
+        roster = vr.load_roster(self.vehicle_roster_path)
+        names = vr.collect_loc_classes(self.statuses, (roster.get("types") or {}).keys())
+        dlg = VehicleRosterDialog(self.root, roster, names)
+        self.root.wait_window(dlg)
+        if dlg.result is None:
+            return
+        if not vr.save_roster(self.vehicle_roster_path, {"types": dlg.result}):
+            messagebox.showerror(
+                "Fuhrpark",
+                "vehicle_roster.json nicht schreibbar.",
+                parent=self.root,
+            )
+            return
+        n_types = len(dlg.result)
+        n_nums = sum(len(entries) for entries in dlg.result.values())
+        self._set_status(
+            f"Fuhrpark gespeichert ({n_nums} Nummern in {n_types} Baureihen, lokal). "
+            "Dashboard neu bauen, damit die Fahrzeuge-Seite ihn nutzt."
+        )
+
     def _on_rebuild_dashboard(self):
         self._commit_edit()
         if self._any_dirty():
@@ -2096,6 +2454,7 @@ class EditorApp:
             "--line-color-patches", self.line_color_patches_path,
             "--home-region", self.home_region_path,
             "--boarding-patches", self.boarding_patches_path,
+            "--vehicle-roster", self.vehicle_roster_path,
         ]
         if self.ignore_plus:
             argv.append("--ignore-plus")
@@ -2218,6 +2577,10 @@ def parse_args(argv=None):
         help="Lokale Einstiegs-Patches (Default: data/boarding_patches.json).",
     )
     parser.add_argument(
+        "--vehicle-roster", default="data/vehicle_roster.json",
+        help="Lokaler Fuhrpark je Baureihe (Default: data/vehicle_roster.json).",
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="Max. Anzahl Statuses beim Laden von der API.",
     )
@@ -2297,6 +2660,7 @@ def main(argv=None):
         line_color_patches_path=args.line_color_patches,
         home_region_path=args.home_region,
         boarding_patches_path=args.boarding_patches,
+        vehicle_roster_path=args.vehicle_roster,
     )
     root.mainloop()
     return 0

@@ -101,11 +101,12 @@
       <div class="tab-head">
         <h2>Übersicht</h2>
         <p>Kennzahlen und meistbefahrene Segmente.</p>
+        <p class="built-at" id="overviewBuilt"></p>
       </div>
       <div class="cards" id="kpis"></div>
-      <div class="panel" id="segpanel" style="margin-top:24px">
+      <div class="panel" id="segpanel" style="margin-top:10px">
         <h3>Meistbefahrene Segmente</h3>
-        <p class="hint" style="margin:0 0 10px;color:var(--muted);font-size:13px">Zunächst 30 Einträge.</p>
+        <p class="hint" style="margin:0 0 6px;color:var(--muted);font-size:13px">Zunächst 30 Einträge.</p>
         <table id="segtable">
           <thead>
             <tr>
@@ -213,7 +214,7 @@
               <th data-k="viaStops" title="Sortieren">Zwischenhalte</th>
               <th data-k="route" title="Sortieren">Laufweg</th>
               <th data-k="distanceKm" title="Sortieren">km</th>
-              <th data-k="durationMin" title="Sortieren">Min</th>
+              <th data-k="durationMin" title="Fahrzeit nach Planlage – Sortieren">Min (Plan)</th>
               <th data-k="delay" title="Sortieren">Versp.</th>
             </tr>
           </thead>
@@ -255,7 +256,7 @@
 
     <section id="daily" class="tab">
       <div class="tab-head">
-        <h2>Tagesziele</h2>
+        <h2>Tagesziele <span class="muted" id="dailyTotals"></span></h2>
         <p>Was an einem Tag zum ersten Mal vorkam – und was an dem Tag wiederholt befahren wurde.</p>
       </div>
       <div class="toolbar">

@@ -7,10 +7,11 @@
     const k=src.kpis||{};
     document.getElementById("subtitle").textContent =
       (k.first&&k.last)? (k.first+" – "+k.last) : "";
+    const builtLabel=DATA.builtAt ? ("Gebaut "+fmtDateTime(DATA.builtAt)) : "";
     const builtEl=document.getElementById("builtAt");
-    if(builtEl && DATA.builtAt){
-      builtEl.textContent="Gebaut "+fmtDateTime(DATA.builtAt);
-    }
+    if(builtEl) builtEl.textContent=builtLabel;
+    const overviewBuilt=document.getElementById("overviewBuilt");
+    if(overviewBuilt) overviewBuilt.textContent=builtLabel;
     const cards=[
       ["Check-ins", (k.count||0).toLocaleString("de-DE")],
       ["Distanz", (k.distanceKm||0).toLocaleString("de-DE")+" km"],

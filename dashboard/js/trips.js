@@ -40,6 +40,10 @@
   function colCount(){ return 12 + (showRoute()?1:0) + (showDelay()?1:0); }
 
   function dash(v){ return v?esc(v):'<span class="muted">—</span>'; }
+  function fmtDurationMin(t){
+    const m=tripShownDuration(t, showDelay());
+    return m==null?'<span class="muted">—</span>':String(m);
+  }
   function delayCell(d){ if(d==null) return '<span class="muted">—</span>';
     if(d>0) return `<span class="pos">+${d}</span>`;
     if(d<0) return `<span class="neg">${d}</span>`; return "0"; }
@@ -90,6 +94,10 @@
       if(sortKey==="line"){ x=lineName(x); y=lineName(y); }
       if(sortKey==="depTime"){ x=tripDep(a); y=tripDep(b); }
       if(sortKey==="arrTime"){ x=tripArr(a); y=tripArr(b); }
+      if(sortKey==="durationMin"){
+        x=tripShownDuration(a, showDelay());
+        y=tripShownDuration(b, showDelay());
+      }
       if(sortKey==="route"){ x=routeOf(a); y=routeOf(b); }
       if(x==null)x=-Infinity; if(y==null)y=-Infinity;
       if(typeof x==="string"){ const r=x.localeCompare(y); return sortAsc?r:-r; }
@@ -101,6 +109,12 @@
   function applyExtraCols(){
     table.classList.toggle("no-delay", !showDelay());
     table.classList.toggle("no-route", !showRoute());
+    const minTh=table.querySelector('th[data-k="durationMin"]');
+    if(minTh){
+      const plan=!showDelay();
+      minTh.textContent=plan?"Min (Plan)":"Min (Ist)";
+      minTh.title=(plan?"Fahrzeit nach Planlage":"Fahrzeit nach Istlage")+" – Sortieren";
+    }
     const hidden=(sortKey==="delay" && !showDelay()) || (sortKey==="route" && !showRoute());
     if(hidden){
       sortKey="date"; sortAsc=false;
@@ -126,13 +140,19 @@
         <td>${fmtTime(tripDep(t))}</td><td>${fmtTime(tripArr(t))}</td>
         <td>${t.viaStops}</td>
         <td class="route">${esc(routeOf(t))}</td>
-        <td>${t.distanceKm}</td><td>${t.durationMin}</td>
+        <td>${t.distanceKm}</td><td>${fmtDurationMin(t)}</td>
         <td class="delay">${delayCell(t.delay)}</td></tr>`).join("");
   }
 
   function copyTsv(){
-    let text=tripsTsv(visible, {route:showRoute(), delay:showDelay(), timeMode:timeMode()});
-    if(homeActive()) text="Fahrten · Eingestellte Filter: Heimatregion\n"+text;
+    const planTimes=timeMode()==="planned";
+    const planMin=!showDelay();
+    let note="Fahrten · ";
+    if(planTimes&&planMin) note+="Planlage";
+    else if(!planTimes&&!planMin) note+="Istlage";
+    else note+="Zeiten "+(planTimes?"Planlage":"Istlage")+" · Minuten "+(planMin?"Planlage":"Istlage");
+    if(homeActive()) note+=" · Eingestellte Filter: Heimatregion";
+    const text=note+"\n"+tripsTsv(visible, {route:showRoute(), delay:showDelay(), timeMode:timeMode()});
     copyText(text, copyBtn);
   }
 

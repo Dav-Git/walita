@@ -219,19 +219,44 @@ function tripDelayText(d){
   if(d>0) return "+"+d;
   return String(d);
 }
+function minutesBetween(startIso, endIso){
+  if(!startIso||!endIso) return null;
+  const a=new Date(startIso), b=new Date(endIso);
+  if(isNaN(a)||isNaN(b)) return null;
+  const m=Math.round((b-a)/60000);
+  return m>=0?m:null;
+}
+/** Ohne Verspätung die Planzeit (Abfahrt Plan → Ankunft Plan), sonst die Istdauer. */
+function tripShownDuration(t, delayOn){
+  if(!t) return null;
+  if(!delayOn) return minutesBetween(t.depPlanned, t.arrPlanned);
+  const real=minutesBetween(t.depReal, t.arrReal);
+  if(real!=null) return real;
+  return t.durationMin==null?null:t.durationMin;
+}
+function lageLabel(planned){ return planned?"Planlage":"Istlage"; }
 function tripsTsv(list, opts){
   opts=opts||{};
   const routeOn=!!opts.route;
   const delayOn=!!opts.delay;
   const mode=opts.timeMode==="real"?"real":"planned";
+  const planTimes=mode==="planned";
+  const planMin=!delayOn;
   const headers=TRIP_TSV_BASE.slice();
   if(routeOn) headers.splice(10, 0, "Laufweg");
   if(delayOn) headers.push("Versp.");
+  const ab=headers.indexOf("Ab");
+  const an=headers.indexOf("An");
+  const min=headers.indexOf("Min");
+  if(ab>=0) headers[ab]="Ab ("+lageLabel(planTimes)+")";
+  if(an>=0) headers[an]="An ("+lageLabel(planTimes)+")";
+  if(min>=0) headers[min]="Min ("+lageLabel(planMin)+")";
   const routes=routeOn?computeTripRoutes(list||[]):null;
   const lines=[headers.join("\t")];
   (list||[]).forEach((t,i)=>{
-    const dep=mode==="planned"?(t.depPlanned||t.depReal):(t.depReal||t.depPlanned);
-    const arr=mode==="planned"?(t.arrPlanned||t.arrReal):(t.arrReal||t.arrPlanned);
+    const dep=planTimes?(t.depPlanned||t.depReal):(t.depReal||t.depPlanned);
+    const arr=planTimes?(t.arrPlanned||t.arrReal):(t.arrReal||t.arrPlanned);
+    const dur=tripShownDuration(t, delayOn);
     const row=[fmtDate(t.date), lineName(t.line), t.operator||"", t.locClass||"",
       t.vehicles||"", t.from||"", t.to||"", tripTimeText(dep), tripTimeText(arr),
       t.viaStops];
@@ -239,7 +264,7 @@ function tripsTsv(list, opts){
       const id=t._i!=null?t._i:i;
       row.push((routes&&routes.get(id))||"");
     }
-    row.push(t.distanceKm, t.durationMin);
+    row.push(t.distanceKm, dur==null?"":dur);
     if(delayOn) row.push(tripDelayText(t.delay));
     lines.push(row.map(tsvCell).join("\t"));
   });

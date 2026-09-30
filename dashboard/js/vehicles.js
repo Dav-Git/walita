@@ -477,7 +477,7 @@
           ${cells}</tr>`;
       }).join("");
       html+=`<div class="matrix-wrap"><h3>${esc(g.title)}</h3>`+
-        `<table class="matrix"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+        `<div class="matrix-scroll"><table class="matrix"><thead>${head}</thead><tbody>${body}</tbody></table></div></div>`;
     });
     container.innerHTML=html;
     countEl.textContent=view.totalVeh+" Fahrzeuge · "+view.filtered.length+" Fahrten";

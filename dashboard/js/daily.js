@@ -5,6 +5,7 @@
   const prevBtn=document.getElementById("dailyPrev");
   const nextBtn=document.getElementById("dailyNext");
   const summaryEl=document.getElementById("dailySummary");
+  const totalsEl=document.getElementById("dailyTotals");
   const bodyEl=document.getElementById("dailyBody");
   const copyBtn=document.getElementById("dailyCopy");
   const INITIAL=40;
@@ -196,8 +197,25 @@
     return wrap;
   }
 
+  function dayTravel(d){
+    let km=0, min=0, hasDur=false;
+    (D().trips||[]).forEach(t=>{
+      if((t.date||"").slice(0,10)!==d) return;
+      km+=Number(t.distanceKm)||0;
+      if(t.durationMin!=null && t.durationMin!==""){
+        min+=Number(t.durationMin)||0;
+        hasDur=true;
+      }
+    });
+    return {km:Math.round(km*10)/10, min:Math.round(min), hasDur};
+  }
+
   function render(){
     const d=dateEl.value;
+    const travel=dayTravel(d);
+    const kmStr=travel.km.toLocaleString("de-DE",{maximumFractionDigits:1});
+    const durStr=travel.hasDur?fmtDuration(travel.min):"—";
+    if(totalsEl) totalsEl.textContent=d ? ("· "+kmStr+" km · "+durStr) : "";
     const buckets=DF[d]||{};
     const repeatBuckets=DR[d]||{};
     const sets=cascadeSets(buckets);

@@ -270,7 +270,7 @@ Stations-Rollen im Dashboard: **Ein-/Ausstieg** (Origin/Destination), **gehalten
 (Träwelling-Zwischenhalt, sitzegeblieben), **physische Durchfahrt** (Via aus dem Patch).
 Zwischenhalte mit `cancelled` („Entfällt“) zählen weder als gehalten noch als
 Durchfahrt und fehlen im Knotenmodell, bis sie als Via im Patch stehen.
-Tag `dubi=start` bzw. `dubi=ende`: Origin bzw. Destination zählen als gehalten, nicht als genutzt.
+Tag `dubi=start` bzw. `dubi=ende` (Durchbindung): der Fahrtbeginn zählt nicht als Einstieg, das Fahrtende nicht als Ausstieg.
 
 ### Stations-Patches (Koordinaten und Merges)
 
@@ -564,6 +564,9 @@ Gespeichert / Fehler) und schreibt den Diff nach Träwelling (`PUT /status/{id}`
 Ziel, Sichtbarkeit, Event und der Laufweg bleiben unberührt. In
 `data/statuses.json` werden nach dem Speichern nur `body` und `tags`
 aktualisiert. Weitere Tags (Sitz, Wagen, …) stehen rechts zur gewählten Fahrt.
+**dubi start** und **dubi ende** (Durchbindung) sind Checkboxen an dieser Fahrt:
+der Fahrtbeginn zählt nicht als Einstieg, das Fahrtende nicht als Ausstieg.
+**Speichern** schreibt die Tags mit.
 Die Sektion **Kanten** listet die Folge-Kanten; **Auf Karte anreichern** setzt
 lokale Via-Patches (`data/edge_patches.json`, siehe [Kanten-Patches](#kanten-patches-physische-via-stationen)).
 **Stationen anpassen** verschiebt Koordinaten und führt Stations-IDs zusammen

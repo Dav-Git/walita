@@ -4,8 +4,10 @@
 """Lokaler Tag-Editor: Tags und Status-Text nach Träwelling synchronisieren.
 
 Die Fahrtliste zeigt Baureihe und Fahrzeugnummer direkt; Zellen werden lokal
-gestagt. Speichern schreibt den Diff live auf den Server. Laufweg/`trip`
-bleibt unangetastet. Linienfarbe, Einstieg, Heimatregion und Fuhrpark sind lokale Overlays (kein API-Write).
+gestagt. Checkboxen „dubi start“ und „dubi ende“ (Durchbindung) setzen die
+gleichnamigen Tags: Fahrtbeginn kein Einstieg, Fahrtende kein Ausstieg.
+Speichern schreibt den Diff live auf den Server. Laufweg/`trip` bleibt unangetastet. Linienfarbe, Einstieg,
+Heimatregion und Fuhrpark sind lokale Overlays (kein API-Write).
 
 Auth wie der Export, aber mit Scope `write-statuses` zusätzlich zu
 `read-statuses`.
@@ -56,7 +58,6 @@ COL_TO_KEY = {"loc": KEY_LOC, "veh": KEY_VEH}
 EDGE_KIND_LABEL = {"override": "Fahrt", "default": "Standard", "": "—"}
 
 TAG_KEY_SUGGESTIONS = (
-    "dubi",
     "trwl:seat",
     "trwl:wagon",
     "trwl:wagon_class",
@@ -209,6 +210,77 @@ def _tag_value(status, key):
         if (t.get("key") or "").strip() == key:
             return "" if t.get("value") is None else str(t.get("value"))
     return ""
+
+
+def _dubi_kind(tag):
+    """``start``, ``ende`` oder None. Dieselben Regeln wie ``dubi_flags``."""
+    start, ende = build_dashboard.dubi_flags([tag])
+    if start:
+        return "start"
+    if ende:
+        return "ende"
+    return None
+
+
+def _new_dubi_tag(kind):
+    """Kanonisches Tag für eine neu gesetzte Checkbox."""
+    return {"key": "dubi=" + kind, "value": kind, "visibility": 0}
+
+
+def apply_dubi_checks(tags, start_on, ende_on, original=None):
+    """Passt dubi-Tags an die Checkboxen an.
+
+    Bleibt eine Checkbox an, bleiben vorhandene Tags stehen — auch
+    ``dubi`` mit Wert ``start``/``ende``. Ein wieder eingeschaltetes Flag
+    setzt die Tags aus ``original`` zurück, sonst ``dubi=start`` bzw.
+    ``dubi=ende``. Ausgeschaltete Flags verschwinden.
+    """
+    kept = []
+    have = set()
+    for t in tags or []:
+        kind = _dubi_kind(t)
+        if kind == "start" and not start_on:
+            continue
+        if kind == "ende" and not ende_on:
+            continue
+        kept.append(t)
+        if kind:
+            have.add(kind)
+    for kind, on in (("start", start_on), ("ende", ende_on)):
+        if not on or kind in have:
+            continue
+        restored = [
+            _norm_tag(t) for t in (original or []) if _dubi_kind(t) == kind
+        ]
+        if restored:
+            kept.extend(restored)
+        else:
+            kept.append(_new_dubi_tag(kind))
+    return kept
+
+
+def _order_like_original(tags, original):
+    """Schlüssel wie in ``original``, danach neue Schlüssel in ``tags``-Folge."""
+    by_key = {}
+    seq = []
+    for t in tags or []:
+        n = _norm_tag(t)
+        if not n["key"] or n["key"] in by_key:
+            continue
+        by_key[n["key"]] = n
+        seq.append(n["key"])
+    merged = []
+    used = set()
+    for t in original or []:
+        key = _norm_tag(t)["key"]
+        if key in by_key and key not in used:
+            merged.append(by_key[key])
+            used.add(key)
+    for key in seq:
+        if key not in used:
+            merged.append(by_key[key])
+            used.add(key)
+    return merged
 
 
 def set_table_tag(status, key, value):
@@ -466,9 +538,15 @@ class TagDialog(tk.Toplevel):
         self.result = None
         initial = initial or {}
 
-        keys = [k for k in TAG_KEY_SUGGESTIONS if k not in TABLE_TAG_SET]
+        keys = [
+            k for k in TAG_KEY_SUGGESTIONS
+            if k not in TABLE_TAG_SET and _dubi_kind({"key": k, "value": ""}) is None
+        ]
         for k in extra_keys or ():
-            if k and k not in keys and k not in TABLE_TAG_SET:
+            if (
+                k and k not in keys and k not in TABLE_TAG_SET
+                and _dubi_kind({"key": k, "value": ""}) is None
+            ):
                 keys.append(k)
         start_key = initial.get("key") or ""
         if start_key and start_key not in keys:
@@ -521,6 +599,13 @@ class TagDialog(tk.Toplevel):
             messagebox.showerror(
                 "Tag",
                 "Baureihe und Fahrzeugnummer in der Tabelle links bearbeiten.",
+                parent=self,
+            )
+            return
+        if _dubi_kind({"key": key, "value": self.val_var.get()}):
+            messagebox.showerror(
+                "Tag",
+                "dubi start und dubi ende über die Checkboxen setzen.",
                 parent=self,
             )
             return
@@ -1171,6 +1256,7 @@ class EditorApp:
         self.filtered = []
         self.current = None
         self._busy = False
+        self._ignore_dubi = False
         self._tag_rows = []
         self._edge_rows = []
         self._ignore_select = False
@@ -1203,6 +1289,13 @@ class EditorApp:
     def _reset_baselines(self):
         self._baseline = {
             s.get("id"): _snapshot_status(s)
+            for s in self.statuses
+            if s.get("id") is not None
+        }
+        self._original_tags = {
+            s.get("id"): [
+                _norm_tag(t) for t in (s.get("tags") or []) if _norm_tag(t)["key"]
+            ]
             for s in self.statuses
             if s.get("id") is not None
         }
@@ -1342,6 +1435,21 @@ class EditorApp:
         self.body.pack(fill="x")
         self.body.bind("<KeyRelease>", lambda _e: self._on_body_changed())
 
+        self.dubi_start_var = tk.BooleanVar(value=False)
+        self.dubi_ende_var = tk.BooleanVar(value=False)
+        ttk.Label(right, text="Durchbindung").pack(anchor="w", pady=(10, 0))
+        self.dubi_start_btn = ttk.Checkbutton(
+            right, text="dubi start: Beginn kein Einstieg",
+            variable=self.dubi_start_var, command=self._on_dubi_changed,
+        )
+        self.dubi_start_btn.pack(anchor="w")
+        self.dubi_ende_btn = ttk.Checkbutton(
+            right, text="dubi ende: Ende kein Ausstieg",
+            variable=self.dubi_ende_var, command=self._on_dubi_changed,
+        )
+        self.dubi_ende_btn.pack(anchor="w")
+        self._sync_dubi_buttons()
+
         ttk.Label(right, text="Weitere Tags").pack(anchor="w", pady=(10, 2))
         tree_fr = ttk.Frame(right)
         tree_fr.pack(fill="both", expand=True)
@@ -1455,6 +1563,7 @@ class EditorApp:
             self.home_btn.configure(state=state)
         if hasattr(self, "roster_btn"):
             self.roster_btn.configure(state=state)
+        self._sync_dubi_buttons()
         if hasattr(self, "board_pick_btn"):
             if busy:
                 self.board_pick_btn.configure(state="disabled")
@@ -1590,16 +1699,37 @@ class EditorApp:
             return None
         return self._status_by_iid(sel[0])
 
+    def _merged_detail_tags(self):
+        """Tabellen-Tags aus dem Status, übrige aus ``_tag_rows``.
+
+        Die Reihenfolge folgt den Tags vom Laden. Neue Schlüssel hängen an.
+        So bleibt eine unangetastete Fahrt beim Wechsel ungestagt.
+        """
+        pieces = []
+        seen = set()
+        for t in self.current.get("tags") or []:
+            n = _norm_tag(t)
+            if n["key"] in TABLE_TAG_SET and n["key"] not in seen:
+                pieces.append(n)
+                seen.add(n["key"])
+        for t in self._tag_rows:
+            n = _norm_tag(t)
+            if n["key"] and n["key"] not in TABLE_TAG_SET and n["key"] not in seen:
+                pieces.append(n)
+                seen.add(n["key"])
+        original = self._original_tags.get(self.current.get("id")) or []
+        return _order_like_original(pieces, original)
+
     def _flush_detail(self):
         if self.current is None or not hasattr(self, "body"):
             return
-        self.current["body"] = self.body.get("1.0", "end-1c")
-        table_tags = [
-            _norm_tag(t) for t in (self.current.get("tags") or [])
-            if _norm_tag(t)["key"] in TABLE_TAG_SET
-        ]
-        other = [t for t in self._tag_rows if t.get("key") not in TABLE_TAG_SET]
-        self.current["tags"] = table_tags + other
+        new_body = self.body.get("1.0", "end-1c")
+        merged = self._merged_detail_tags()
+        if _snapshot_status(self.current) == (new_body or "", _tags_tuple(merged)):
+            self._refresh_trip_row(self.current)
+            return
+        self.current["body"] = new_body
+        self.current["tags"] = merged
         self._refresh_trip_row(self.current)
 
     def _clear_detail(self):
@@ -1607,10 +1737,12 @@ class EditorApp:
         self.body.delete("1.0", "end")
         self._update_body_count()
         self._tag_rows = []
+        self._show_dubi_checks()
         self._refresh_extra_tree()
         self._refresh_edges()
         self._refresh_line_color()
         self._refresh_boarding()
+        self._sync_dubi_buttons()
 
     def _on_select(self):
         if self._busy or self._ignore_select:
@@ -1643,7 +1775,9 @@ class EditorApp:
             _norm_tag(t) for t in (status.get("tags") or [])
             if _norm_tag(t)["key"] and _norm_tag(t)["key"] not in TABLE_TAG_SET
         ]
+        self._show_dubi_checks()
         self._refresh_extra_tree()
+        self._sync_dubi_buttons()
         self._refresh_edges()
         self._refresh_line_color()
         self._refresh_boarding()
@@ -1675,23 +1809,65 @@ class EditorApp:
         n = len(self.body.get("1.0", "end-1c"))
         self.body_count.set(f"{n}/{BODY_MAX}")
 
+    def _show_dubi_checks(self):
+        """Checkboxen aus den Tags, ohne sie umzuschreiben."""
+        if not hasattr(self, "dubi_start_var"):
+            return
+        start, ende = build_dashboard.dubi_flags(self._tag_rows)
+        self._ignore_dubi = True
+        try:
+            self.dubi_start_var.set(bool(start))
+            self.dubi_ende_var.set(bool(ende))
+        finally:
+            self._ignore_dubi = False
+
+    def _sync_dubi_buttons(self):
+        if not hasattr(self, "dubi_start_btn"):
+            return
+        state = "normal" if self.current is not None and not self._busy else "disabled"
+        self.dubi_start_btn.configure(state=state)
+        self.dubi_ende_btn.configure(state=state)
+
+    def _on_dubi_changed(self):
+        if self._ignore_dubi or self.current is None or self._busy:
+            return
+        original = self._original_tags.get(self.current.get("id")) or []
+        self._tag_rows = apply_dubi_checks(
+            self._tag_rows,
+            bool(self.dubi_start_var.get()),
+            bool(self.dubi_ende_var.get()),
+            original=original,
+        )
+        self._refresh_extra_tree()
+        self._flush_detail()
+
     def _refresh_extra_tree(self):
         self.tree.delete(*self.tree.get_children())
         for i, t in enumerate(self._tag_rows):
+            if _dubi_kind(t):
+                continue
             self.tree.insert(
                 "", "end", iid=str(i),
                 values=(t["key"], t["value"], VISIBILITY_LABEL.get(t["visibility"], t["visibility"])),
             )
 
     def _suggestion_keys(self):
-        extra = [t["key"] for t in self._tag_rows]
-        seen = set(extra)
+        extra = []
+        seen = set()
+
+        def add(k):
+            if (
+                k and k not in seen and k not in TABLE_TAG_SET
+                and _dubi_kind({"key": k, "value": ""}) is None
+            ):
+                extra.append(k)
+                seen.add(k)
+
+        for t in self._tag_rows:
+            add(t.get("key") or "")
         for s in self.statuses:
             for t in s.get("tags") or []:
-                k = (t.get("key") or "").strip()
-                if k and k not in seen and k not in TABLE_TAG_SET:
-                    extra.append(k)
-                    seen.add(k)
+                add((t.get("key") or "").strip())
         return extra
 
     def _add_tag(self):
@@ -2362,6 +2538,7 @@ class EditorApp:
                 s["body"] = new_body
                 s["tags"] = new_tags
                 self._baseline[sid] = _snapshot_status(s)
+                self._original_tags[sid] = list(new_tags)
                 self._refresh_trip_row(s)
                 if self.current is not None and self.current.get("id") == sid:
                     self._load_status(s)

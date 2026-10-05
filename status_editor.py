@@ -1229,7 +1229,8 @@ class EditorApp:
                  line_color_patches_path="data/line_color_patches.json",
                  home_region_path="data/home_region.json",
                  boarding_patches_path="data/boarding_patches.json",
-                 vehicle_roster_path="data/vehicle_roster.json"):
+                 vehicle_roster_path="data/vehicle_roster.json",
+                 operator_line_patches_path="operator_line_patches.json"):
         self.root = root
         self.token = token
         self.username = username
@@ -1245,6 +1246,7 @@ class EditorApp:
         self.home_region_path = home_region_path
         self.boarding_patches_path = boarding_patches_path
         self.vehicle_roster_path = vehicle_roster_path
+        self.operator_line_patches_path = operator_line_patches_path
         self.patches = ep.load_patches(edge_patches_path)
         self.station_patches = sp.load_patches(station_patches_path)
         self.line_color_patches = lcp.load_patches(line_color_patches_path)
@@ -2632,6 +2634,7 @@ class EditorApp:
             "--home-region", self.home_region_path,
             "--boarding-patches", self.boarding_patches_path,
             "--vehicle-roster", self.vehicle_roster_path,
+            "--operator-line-patches", self.operator_line_patches_path,
         ]
         if self.ignore_plus:
             argv.append("--ignore-plus")
@@ -2758,6 +2761,10 @@ def parse_args(argv=None):
         help="Lokaler Fuhrpark je Baureihe (Default: data/vehicle_roster.json).",
     )
     parser.add_argument(
+        "--operator-line-patches", default="operator_line_patches.json",
+        help="Operator einer Linie überschreiben (Default: operator_line_patches.json).",
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="Max. Anzahl Statuses beim Laden von der API.",
     )
@@ -2838,6 +2845,7 @@ def main(argv=None):
         home_region_path=args.home_region,
         boarding_patches_path=args.boarding_patches,
         vehicle_roster_path=args.vehicle_roster,
+        operator_line_patches_path=args.operator_line_patches,
     )
     root.mainloop()
     return 0

@@ -1,0 +1,10 @@
+{
+  "_comment": "Operator einer bestimmten Linie überschreiben. Sonderfälle, kein Editor. line = checkin.lineName, operator = aktueller Name (nach operator_replacements.json), name = Ersatz. Gilt nur beim Dashboard-Bau auf Kopien; statuses.json bleibt unverändert.",
+  "rules": [
+    {
+      "line": "S2",
+      "operator": "Verkehrsbetriebe Karlsruhe",
+      "name": "Albtal-Verkehrs-Gesellschaft"
+    }
+  ]
+}

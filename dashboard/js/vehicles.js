@@ -5,6 +5,7 @@
   let vehScoped=false;
   const container=document.getElementById("vehMatrices");
   const groupEl=document.getElementById("vehGroup");
+  const lineSortEl=document.getElementById("vehLineSort");
   const opEl=document.getElementById("vehOperator");
   const catEl=document.getElementById("vehCategory");
   const dateFromEl=document.getElementById("vehDateFrom");
@@ -258,6 +259,25 @@
     closeRun(run);
   }
 
+  function compareLineName(a, b){
+    return lineName(a).localeCompare(lineName(b),undefined,{numeric:true})
+      || String(a).localeCompare(String(b));
+  }
+  /** Linienspalten: Name, oder absteigend nach Fahrten in dieser Tabelle. */
+  function sortLines(lineSet, recs){
+    const lines=[...lineSet];
+    if(lineSortEl&&lineSortEl.value==="rides"){
+      const counts=new Map();
+      recs.forEach(r=>{
+        if(!r.line) return;
+        counts.set(r.line,(counts.get(r.line)||0)+1);
+      });
+      lines.sort((a,b)=>(counts.get(b)||0)-(counts.get(a)||0)||compareLineName(a,b));
+      return lines;
+    }
+    lines.sort(compareLineName);
+    return lines;
+  }
   function lineColLabel(key, lines){
     const name=lineName(key)||"(ohne Linie)";
     const same=lines.filter(l=>lineName(l)===lineName(key));
@@ -299,6 +319,7 @@
     const q=filterEl.value.trim();
     if(q) parts.push("Suche "+q);
     if(hideUnusedEl&&hideUnusedEl.checked) parts.push("ohne unbenutzte");
+    if(lineSortEl&&lineSortEl.value==="rides") parts.push("Spalten nach Fahrten");
     const label=parts.length ? parts.join(" · ") : "Alle";
     return "Fahrzeuge · Eingestellte Filter: "+label;
   }
@@ -360,9 +381,7 @@
           });
         });
       }
-      const lines=[...lineSet].sort((a,b)=>
-        lineName(a).localeCompare(lineName(b),undefined,{numeric:true})
-        || String(a).localeCompare(String(b)));
+      const lines=sortLines(lineSet, recs);
       const rowArr=[...rowMap.values()];
       rowArr.forEach(row=>{
         applyRoster(row);
@@ -394,11 +413,16 @@
     return {kind:"ok", shows, showClass, filtered, totalVeh, groups};
   }
 
+  // Eine leere TSV-Zelle ist nur ein Tab. Mehrere hintereinander verzählt eine KI.
+  // „—“ ist schon das Zeichen für fehlende Daten (zuerst/zuletzt) und kommt als
+  // Zellinhalt sonst nicht vor.
+  const TSV_EMPTY="—";
   function vehiclesTsv(view){
     const head=tsvCell(activeFilterHeading());
+    const legend="Leere Zelle: — (keine Fahrt auf dieser Linie bzw. keine Angabe). Jede Zelle ist gefüllt.";
     if(!view||view.kind==="empty") return head+"\nKeine Fahrzeug-Tags vorhanden.";
     if(view.kind==="none") return head+"\nKeine Fahrzeuge für die gewählten Filter.";
-    return head+"\n\n"+view.groups.map(g=>{
+    return head+"\n"+legend+"\n\n"+view.groups.map(g=>{
       const headers=["Wagen"];
       if(view.showClass) headers.push("Baureihe");
       const showRetired=g.roster||g.rows.some(row=>row.withdrawn);
@@ -407,14 +431,18 @@
       g.lines.forEach(l=>headers.push(lineColLabel(l, g.lines)));
       const lines=[g.title, headers.join("\t")];
       g.rows.forEach(row=>{
-        const cells=[row.number];
-        if(view.showClass) cells.push(row.locClass||"");
+        const cells=[row.number||TSV_EMPTY];
+        if(view.showClass) cells.push(row.locClass||TSV_EMPTY);
         if(showRetired)
-          cells.push(row.withdrawn?(fmtIsoDay(row.withdrawnOn)||"ja"):"");
-        cells.push(row.first?fmtDate(row.first):"—", row.last?fmtDate(row.last):"—", row.count, row.km);
+          cells.push(row.withdrawn?(fmtIsoDay(row.withdrawnOn)||"ja"):TSV_EMPTY);
+        cells.push(
+          row.first?fmtDate(row.first):TSV_EMPTY,
+          row.last?fmtDate(row.last):TSV_EMPTY,
+          row.count, row.km);
         g.lines.forEach(l=>{
           const cr=row.recs.filter(x=>x.line===l);
-          cells.push(cr.length?cellText(cr, view.shows):"");
+          const text=cr.length?cellText(cr, view.shows):"";
+          cells.push(text||TSV_EMPTY);
         });
         lines.push(cells.map(tsvCell).join("\t"));
       });
@@ -512,7 +540,9 @@
   document.getElementById("vehModalClose").onclick=closeModal;
   modal.addEventListener("click",e=>{ if(e.target===modal) closeModal(); });
   document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
-  [groupEl,opEl,catEl].forEach(el=>el.onchange=renderMatrices);
+  [groupEl,opEl,catEl,lineSortEl].forEach(el=>{
+    if(el) el.onchange=renderMatrices;
+  });
   [dateFromEl,dateToEl].forEach(el=>{
     el.onchange=renderMatrices;
     el.oninput=renderMatrices;

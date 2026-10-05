@@ -37,6 +37,8 @@ from line_color_patches import load_patches as load_line_color_patches
 from line_color_patches import status_id as color_status_id
 from line_color_patches import to_css_pair
 from home_region import filter_statuses, load_operators
+from operator_line_patches import apply_to_statuses as apply_operator_line_patches
+from operator_line_patches import load_rules as load_operator_line_rules
 from vehicle_roster import load_roster
 from station_patches import apply_station_patches
 from station_patches import load_patches as load_station_patches
@@ -2273,6 +2275,11 @@ def main(argv=None):
         help="Lokaler Fuhrpark je Baureihe "
              "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
     )
+    parser.add_argument(
+        "--operator-line-patches", default="operator_line_patches.json",
+        help="Operator einer Linie überschreiben "
+             "(Default: operator_line_patches.json; fehlende Datei = keine Änderung).",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -2359,6 +2366,21 @@ def main(argv=None):
             f"aus {args.vehicle_roster}.")
     elif os.path.isfile(args.vehicle_roster):
         log(f"Fuhrpark: {args.vehicle_roster} enthält keine Nummern.")
+
+    try:
+        operator_line_rules = load_operator_line_rules(args.operator_line_patches)
+    except ValueError as e:
+        log(f"Fehler: {e}")
+        return 2
+    statuses, n_op_line = apply_operator_line_patches(operator_line_rules, statuses)
+    if operator_line_rules:
+        n_rules = len(operator_line_rules)
+        log(f"Operator-Linien-Patches: {n_op_line} Fahrten, "
+            f"{n_rules} {'Regel' if n_rules == 1 else 'Regeln'} "
+            f"aus {args.operator_line_patches}.")
+    elif os.path.isfile(args.operator_line_patches):
+        log(f"Operator-Linien-Patches: {args.operator_line_patches} "
+            f"enthält keine Regeln.")
 
     edge_measures = None
     if n_board:

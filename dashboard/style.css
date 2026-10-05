@@ -84,11 +84,32 @@
   .map-filter-head { margin:0 0 10px; font-size:15px; font-weight:700; }
   #mapview { height:74vh; border:1px solid var(--border); border-radius:var(--radius);
         background:var(--panel2); box-shadow:var(--shadow); }
+  #mapview:fullscreen, #mapview:-webkit-full-screen {
+    width:100%; height:100%; border:none; border-radius:0; box-shadow:none;
+  }
+  #mapview.is-fullscreen {
+    position:fixed; inset:0; z-index:4000; width:100%; height:100%;
+    border:none; border-radius:0; box-shadow:none;
+  }
+  .leaflet-control-fullscreen a.map-fs-btn {
+    display:flex; align-items:center; justify-content:center;
+    width:30px; height:30px; line-height:30px;
+    color:var(--fg); background:var(--panel);
+  }
+  .leaflet-bar a.map-fs-btn:hover { background:var(--panel2); color:var(--fg); }
+  .map-fs-btn svg { display:block; }
   .legend { background:var(--panel); padding:6px 8px; border-radius:10px;
             border:1px solid var(--border); color:var(--fg); font-size:12px; line-height:1.4;
             box-shadow:var(--shadow); }
   .legend i { display:inline-block; width:24px; height:4px; margin-right:6px;
               vertical-align:middle; border-radius:2px; }
+  .map-veh-badge.leaflet-marker-icon { background:transparent; border:none; pointer-events:none; }
+  .map-veh-badge span {
+    display:inline-block; padding:0 4px; border-radius:3px;
+    font-size:10px; font-weight:700; line-height:14px; color:#fff;
+    white-space:nowrap; pointer-events:none; transform:translate(-50%,-50%);
+    box-shadow:0 0 0 1px rgba(0,0,0,.35);
+  }
   .leaflet-popup-content-wrapper, .leaflet-popup-tip { background:var(--panel); color:var(--fg); }
 
   .toolbar { margin-bottom:8px; display:flex; gap:6px 8px; align-items:center; flex-wrap:wrap;

@@ -28,6 +28,7 @@ Die beiden Stufen können auch einzeln genutzt werden:
 | `boarding_patches.py` | Lokale Einstiegs-Patches je Status |
 | `home_region.py` | Lokale Operator-Liste der Heimatregion |
 | `vehicle_roster.py` | Lokaler Fuhrpark: Fahrzeugnummern je Baureihe |
+| `operator_line_patches.py` | Operator einer Linie überschreiben (Sonderfälle, Datei) |
 | `auth.py` | OAuth (Authorization Code + PKCE), von den anderen Skripten genutzt |
 
 ## Installation
@@ -53,6 +54,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── boarding_patches.py    # Lokale Einstiegs-Patches je Status
 ├── home_region.py         # Lokale Operator-Liste der Heimatregion
 ├── vehicle_roster.py      # Lokaler Fuhrpark: Fahrzeugnummern je Baureihe
+├── operator_line_patches.py  # Operator einer Linie (Sonderfälle)
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
@@ -63,6 +65,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 │   └── js/
 ├── version.py             # Version + User-Agent
 ├── operator_replacements.json  # manuelle Operator-Namen-Ersetzungen
+├── operator_line_patches.json  # Operator einer Linie (Sonderfälle)
 ├── loc_class_families.txt      # Baureihe → Familie (Kartenfilter)
 ├── examples/              # Demo-Dataset (eingecheckt, siehe Demo)
 │   ├── statuses.json
@@ -220,6 +223,31 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
    (`checkin.operator.name`: Rohname → kanonischer Name). Die Datei ist manuell
    zu pflegen; Schlüssel mit führendem `_` (Kommentare) werden ignoriert.
    Fehlt die Datei, bleibt alles unverändert.
+
+### Operator je Linie
+
+Steht eine Linie unter dem falschen Operator, setzt
+[`operator_line_patches.json`](operator_line_patches.json) den Namen beim
+Dashboard-Bau auf einer Kopie um. `statuses.json` bleibt unverändert, es gibt
+keinen Editor: die Datei ist der Sonderfall. Die Heimatregion filtert danach,
+die Linie zählt also unter dem neuen Operator.
+
+```json
+{
+  "rules": [
+    {
+      "line": "S2",
+      "operator": "Verkehrsbetriebe Karlsruhe",
+      "name": "Albtal-Verkehrs-Gesellschaft"
+    }
+  ]
+}
+```
+
+- `line` ist `checkin.lineName`, `operator` der Name nach den
+  Operator-Ersetzungen. Die erste passende Regel gilt.
+- Fehlende Datei = keine Änderung. Pfad: `--operator-line-patches`
+  (Default `operator_line_patches.json`).
 
 Baureihenfamilien für den Kartenfilter stehen in
 [`loc_class_families.txt`](loc_class_families.txt) (JSON-Objekt
@@ -489,12 +517,30 @@ zusammengefügt. Sieben Ansichten:
   Gemappte Baureihenfamilien erscheinen zusätzlich im Dropdown „Baureihe“
   (Auswahl der Familie zeigt alle Mitglieds-Baureihen).
   Dicke und Farbe zeigen, wie oft ein Segment befahren wurde, der Pfeil die
-  Richtung. Gehaltene Stationen ohne Ein-/Ausstieg erscheinen als weißer Kreis
+  Richtung. Das Dropdown **Darstellung** schaltet auf **Fahrzeuge**: je
+  Fahrzeug eine eigene Farbe. Der Farbkreis umfasst nur die Fahrzeuge des
+  aktuellen Filters und wird beim Filterwechsel neu vergeben, beginnend bei
+  Gelb, damit auch Gelb und Grün vorkommen. Diese beiden bleiben gesättigt
+  und hell genug, dass sie nicht oliv wirken. Fahrzeuge auf
+  derselben Kante bekommen möglichst weit auseinanderliegende Töne; die
+  Wagennummer legt die Farbe nicht fest. Die Linien bleiben gerichtet und im Rechtsverkehr
+  versetzt, mit einer sichtbaren Lücke zwischen den beiden Richtungen.
+  Mehrere Fahrzeuge auf derselben gerichteten Kante stapeln sich nach
+  außen, die Lücke bleibt frei. Im Stapel stehen nur Fahrzeuge, die der
+  aktuelle Filter noch zeigt. Nur in diesem Modus werden Kanten desselben Fahrzeugs über
+  Zwischenstationen mit einer Kurve verbunden (geradeaus zuerst, Abzweige
+  als neuer Pfad). Die Nummer wird entlang der Linie vorgemerkt und im
+  sichtbaren Ausschnitt höchstens dreimal gezeigt, an den Stellen, die
+  möglichst weit über die Karte verteilt sind. Überdeckungen entfallen. Gehaltene Stationen ohne Ein-/Ausstieg erscheinen als weißer Kreis
   mit schwarzem Rand, reine physische Durchfahrten als kleiner, gedämpfter Punkt.
   Die Checkbox **Entdeckte Kanten** (Standard aus) legt in Grau
   gerichtete Stopover-Paare darüber, die unter dem aktuellen Filter nicht
   eingecheckt sind (z.B. auf dieser Linie nur im Laufweg gesehen, auf einer
-  anderen Linie aber befahren). Die übrigen Kartenfilter gelten analog.
+  anderen Linie aber befahren).   Die übrigen Kartenfilter gelten analog.
+  **Vollbild** (Schaltfläche oben links auf der Karte, unter dem Zoom) schaltet
+  nur die Karte selbst in den echten Vollbildmodus des Browsers. Filter und
+  Seitenleiste bleiben draußen. Esc oder dieselbe Schaltfläche beendet ihn.
+  Die Ansicht bleibt dabei erhalten.
   Braucht Internet (Leaflet + Kacheln); der Rest läuft offline.
 
   ![Karte](docs/screenshots/02-karte-berlin.jpg)
@@ -517,7 +563,8 @@ zusammengefügt. Sieben Ansichten:
   ![Fahrten](docs/screenshots/06-fahrten.png)
 
 - **Fahrzeuge** – Matrix getaggter Wagennummern (`trwl:vehicle_number`) je Linie,
-  gruppiert nach Baureihe/Kategorie. Mit Fuhrpark je Baureihe jede definierte
+  gruppiert nach Baureihe/Kategorie. Linienspalten nach Name oder nach Anzahl
+  Fahrten in der Tabelle. Mit Fuhrpark je Baureihe jede definierte
   Nummer, die Abdeckung und ausgemusterte Wagen schwarz (Goldrand läuft durch).
 
   ![Fahrzeuge](docs/screenshots/05-fahrzeuge.png)
@@ -548,6 +595,7 @@ python3 build_dashboard.py --line-color-patches data/line_color_patches.json --o
 python3 build_dashboard.py --boarding-patches data/boarding_patches.json --open
 python3 build_dashboard.py --home-region data/home_region.json --open
 python3 build_dashboard.py --vehicle-roster data/vehicle_roster.json --open
+python3 build_dashboard.py --operator-line-patches operator_line_patches.json --open
 ```
 
 ## Tag-Editor

@@ -143,9 +143,13 @@
     <section id="map" class="tab">
       <div class="tab-head">
         <h2>Karte</h2>
-        <p>Gerichtete Befahrungs-Heatmap – filterbar nach Fahrt-Attributen.</p>
+        <p>Gerichtete Befahrungs-Heatmap oder eine Linie je Fahrzeug – filterbar nach Fahrt-Attributen.</p>
       </div>
       <div class="toolbar">
+        <label class="ctl">Darstellung <select id="mapMode">
+          <option value="heat">Heatmap</option>
+          <option value="vehicle">Fahrzeuge</option>
+        </select></label>
         <label class="ctl">Linie <select id="mapLine"></select></label>
         <label class="ctl">Baureihe <select id="mapLoc"></select></label>
         <label class="ctl">Fahrzeug <select id="mapVehicle"></select></label>
@@ -226,7 +230,7 @@
     <section id="vehicles" class="tab">
       <div class="tab-head">
         <h2>Fahrzeuge</h2>
-        <p>Getaggte Wagennummern je Baureihe/Kategorie und Linie. Mit Fuhrpark jede definierte Nummer und die Abdeckung.</p>
+        <p>Getaggte Wagennummern je Baureihe/Kategorie und Linie. Linienspalten nach Name oder nach Anzahl Fahrten. Mit Fuhrpark jede definierte Nummer und die Abdeckung.</p>
       </div>
       <h3 id="vehFilterHead" class="map-filter-head">Eingestellte Filter</h3>
       <div class="toolbar">
@@ -234,6 +238,12 @@
           <select id="vehGroup">
             <option value="locClass">Baureihe</option>
             <option value="category">Produktkategorie</option>
+          </select>
+        </label>
+        <label class="ctl">Linienspalten
+          <select id="vehLineSort">
+            <option value="name">Name</option>
+            <option value="rides">Anzahl Fahrten</option>
           </select>
         </label>
         <label class="ctl">Operator <select id="vehOperator"></select></label>

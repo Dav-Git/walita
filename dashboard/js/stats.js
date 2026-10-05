@@ -63,6 +63,47 @@ function statsVehKey(loc, num){
 function statsCmp(a,b){ return a<b?-1:a>b?1:0; }
 function statsCmpDesc(a,b){ return statsCmp(b,a); }
 
+// Die sechs Kantenlisten der Statistik aus einer Zeilenliste (stats.edgeRows
+// bzw. aggregateStats). Sortierung stabil: bei Gleichstand entscheidet die
+// Eingangsreihenfolge.
+function edgeLists(rows){
+  const sortEdges=(list, cmp)=>list.slice().sort(cmp);
+  return {
+    edgesByCount:sortEdges(rows, (a,b)=>{
+      if(a.count!==b.count) return b.count-a.count;
+      const c=statsCmp(a.from||"", b.from||"");
+      if(c) return c;
+      return statsCmp(a.to||"", b.to||"");
+    }),
+    edgesByDaysSince:sortEdges(rows, (a,b)=>{
+      const c=statsCmp(a.last||"9999", b.last||"9999");
+      if(c) return c;
+      if(a.count!==b.count) return b.count-a.count;
+      return statsCmp(a.from||"", b.from||"");
+    }),
+    edgesByLast:sortEdges(rows, (a,b)=>{
+      const c=statsCmpDesc(a.last||"", b.last||"");
+      if(c) return c;
+      return statsCmpDesc(a.from||"", b.from||"");
+    }),
+    edgesByFirst:sortEdges(rows, (a,b)=>{
+      const c=statsCmp(a.first||"9999", b.first||"9999");
+      if(c) return c;
+      return statsCmp(a.from||"", b.from||"");
+    }),
+    edgesByFirstNew:sortEdges(rows, (a,b)=>{
+      const c=statsCmpDesc(a.first||"", b.first||"");
+      if(c) return c;
+      return statsCmpDesc(a.from||"", b.from||"");
+    }),
+    edgesOnce:sortEdges(rows.filter(r=>r.count===1), (a,b)=>{
+      const c=statsCmp(a.last||"9999", b.last||"9999");
+      if(c) return c;
+      return statsCmp(a.from||"", b.from||"");
+    }),
+  };
+}
+
 function aggregateStats(src, from, to){
   const trips=src.trips||[];
   const allEdges=src.statEdges||[];
@@ -387,38 +428,6 @@ function aggregateStats(src, from, to){
   }
   const allEdgeRows=[...edgeAggs.values()].map(edgeRow);
   function sortEdges(rows, cmp){ return rows.slice().sort(cmp); }
-  const byCount=sortEdges(allEdgeRows, (a,b)=>{
-    if(a.count!==b.count) return b.count-a.count;
-    const c=statsCmp(a.from||"", b.from||"");
-    if(c) return c;
-    return statsCmp(a.to||"", b.to||"");
-  });
-  const byDays=sortEdges(allEdgeRows, (a,b)=>{
-    const c=statsCmp(a.last||"9999", b.last||"9999");
-    if(c) return c;
-    if(a.count!==b.count) return b.count-a.count;
-    return statsCmp(a.from||"", b.from||"");
-  });
-  const byLast=sortEdges(allEdgeRows, (a,b)=>{
-    const c=statsCmpDesc(a.last||"", b.last||"");
-    if(c) return c;
-    return statsCmpDesc(a.from||"", b.from||"");
-  });
-  const byFirst=sortEdges(allEdgeRows, (a,b)=>{
-    const c=statsCmp(a.first||"9999", b.first||"9999");
-    if(c) return c;
-    return statsCmp(a.from||"", b.from||"");
-  });
-  const byFirstNew=sortEdges(allEdgeRows, (a,b)=>{
-    const c=statsCmpDesc(a.first||"", b.first||"");
-    if(c) return c;
-    return statsCmpDesc(a.from||"", b.from||"");
-  });
-  const once=sortEdges(allEdgeRows.filter(r=>r.count===1), (a,b)=>{
-    const c=statsCmp(a.last||"9999", b.last||"9999");
-    if(c) return c;
-    return statsCmp(a.from||"", b.from||"");
-  });
 
   function comboSort(a, b){
     if(a.count!==b.count) return b.count-a.count;
@@ -562,12 +571,7 @@ function aggregateStats(src, from, to){
     crossLineDelay:packCross(crosses.crossLineDelay, STATS_DELAYS),
     crossLocClassDelay:packCross(crosses.crossLocClassDelay, STATS_DELAYS),
     crossVehicleMonth:packCross(crosses.crossVehicleMonth, months),
-    edgesByCount:byCount,
-    edgesByDaysSince:byDays,
-    edgesByLast:byLast,
-    edgesByFirst:byFirst,
-    edgesByFirstNew:byFirstNew,
-    edgesOnce:once,
+    edgeRows:allEdgeRows,
     vehEdgeGt1:vehEdgeGt1,
     vehEdgeLineGt1:vehEdgeLineGt1,
     lineEdgeGt1:lineEdgeGt1,
@@ -1017,10 +1021,11 @@ function aggregateStats(src, from, to){
     ["edgesByFirstNew", "Jüngste Erstbefahrung", "Sortiert nach Datum zuerst (neueste zuerst). „Tage her“ seit Erstbefahrung. Zunächst 40 Einträge.", "first", false, edgeColsFirst, "stats-edges-by-first-new"],
     ["edgesOnce", "Vergessene Einmal-Kanten", "Nur einmal befahren, sortiert nach Tagen her. Zunächst 40 Einträge.", "daysSinceLast", false, edgeCols, "stats-edges-once"],
   ];
+  const E=edgeLists(S.edgeRows||[]);
   edgeBlocks.forEach(([key,title,hint,sort,asc,cols,id])=>{
     const holder=document.createElement("div");
     edgesEl.appendChild(holder);
-    renderComboTable(holder, title, hint, S[key], cols,
+    renderComboTable(holder, title, hint, E[key], cols,
       {defaultSort:sort, defaultAsc:asc, id:id, initialLimit:40});
   });
 

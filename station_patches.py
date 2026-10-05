@@ -8,7 +8,6 @@ Kanten-Patches: Moves überschreiben Lat/Lon, Merges schreiben IDs auf den
 Survivor um. Quelle `stations.json` / `statuses.json` bleibt unangetastet.
 """
 
-import copy
 import json
 import math
 import os
@@ -181,41 +180,74 @@ def apply_to_stations(patches, stations):
     return out
 
 
-def _remap_stop(obj, aliases, stations):
+def _stop_hits(obj, aliases):
+    """True, wenn der Halt oder seine verschachtelte Station gemergt ist."""
     if not isinstance(obj, dict):
-        return
-    sid = station_id(obj.get("id"))
+        return False
+    if station_id(obj.get("id")) in aliases:
+        return True
+    return _stop_hits(obj.get("station"), aliases)
+
+
+def _remap_stop(obj, aliases, stations):
+    """Kopie des Halts mit Survivor-ID (+ Name/Koordinaten), sonst obj selbst."""
+    if not _stop_hits(obj, aliases):
+        return obj
+    out = dict(obj)
+    sid = station_id(out.get("id"))
     if sid in aliases:
         dest = aliases[sid]
-        obj["id"] = dest
+        out["id"] = dest
         st = lookup_station(stations, dest) or {}
         if st.get("name"):
-            obj["name"] = st["name"]
+            out["name"] = st["name"]
         lat, lon = st.get("latitude"), st.get("longitude")
         if lat is not None and lon is not None:
-            obj["latitude"] = lat
-            obj["longitude"] = lon
-    nested = obj.get("station")
+            out["latitude"] = lat
+            out["longitude"] = lon
+    nested = out.get("station")
     if isinstance(nested, dict):
-        _remap_stop(nested, aliases, stations)
+        out["station"] = _remap_stop(nested, aliases, stations)
+    return out
 
 
 def apply_to_statuses(statuses, aliases, stations):
-    """Deepcopy der Statusse, Origin/Dest/Stopover-IDs (+ Name) auf Survivor."""
+    """Origin/Dest/Stopover-IDs (+ Name) auf Survivor. Mutiert nicht.
+
+    Nur betroffene Statuses und darin nur die geänderten Teile werden
+    kopiert; der Rest wird geteilt.
+    """
     if not statuses or not aliases:
         return statuses
-    out = copy.deepcopy(statuses)
-    for status in out:
+    out = []
+    for status in statuses:
         if not isinstance(status, dict):
+            out.append(status)
             continue
+        item = status
         checkin = status.get("checkin")
         if isinstance(checkin, dict):
-            _remap_stop(checkin.get("origin"), aliases, stations)
-            _remap_stop(checkin.get("destination"), aliases, stations)
+            origin = _remap_stop(checkin.get("origin"), aliases, stations)
+            dest = _remap_stop(checkin.get("destination"), aliases, stations)
+            if origin is not checkin.get("origin") or dest is not checkin.get("destination"):
+                checkin = dict(checkin)
+                if "origin" in checkin:
+                    checkin["origin"] = origin
+                if "destination" in checkin:
+                    checkin["destination"] = dest
+                item = dict(item)
+                item["checkin"] = checkin
         trip = status.get("trip")
         if isinstance(trip, dict):
-            for stop in trip.get("stopovers") or []:
-                _remap_stop(stop, aliases, stations)
+            stops = trip.get("stopovers") or []
+            mapped = [_remap_stop(stop, aliases, stations) for stop in stops]
+            if any(a is not b for a, b in zip(mapped, stops)):
+                trip = dict(trip)
+                trip["stopovers"] = mapped
+                if item is status:
+                    item = dict(item)
+                item["trip"] = trip
+        out.append(item)
     return out
 
 

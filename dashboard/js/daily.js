@@ -112,10 +112,34 @@
     },
   ];
 
+  // Gegenstück zu pack_daily in build_dashboard.py: Index-Listen zurück zu
+  // Objekten mit den Feldnamen der Kategorie. Ergebnis je Payload gecacht.
+  const unpacked = new WeakMap();
+  function unpackDaily(packed) {
+    if (!packed || !packed.days) return {};
+    if (unpacked.has(packed)) return unpacked.get(packed);
+    const fields = packed.fields || {}, strings = packed.strings || [];
+    const out = {};
+    Object.keys(packed.days).forEach(date => {
+      const day = packed.days[date], o = {};
+      Object.keys(day).forEach(cat => {
+        const f = fields[cat];
+        o[cat] = f ? day[cat].map(r => {
+          const x = {};
+          f.forEach((k, i) => { x[k] = strings[r[i]]; });
+          return x;
+        }) : day[cat];
+      });
+      out[date] = o;
+    });
+    unpacked.set(packed, out);
+    return out;
+  }
+
   function syncDaily(keep) {
     const src = D();
-    DF = src.dailyFirsts || {};
-    DR = src.dailyRepeats || {};
+    DF = unpackDaily(src.dailyFirsts);
+    DR = unpackDaily(src.dailyRepeats);
     dates = [...new Set(Object.keys(DF).concat(Object.keys(DR)))].sort();
     LC = src.lineColors || {};
     const k = src.kpis || {};

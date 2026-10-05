@@ -713,6 +713,165 @@ class LineColorDialog(tk.Toplevel):
         self.destroy()
 
 
+class LineColorOverridesDialog(tk.Toplevel):
+    """Vorhandene Linienfarben-Overrides, gruppiert nach Linie.
+
+    Ändern/Löschen gilt für die gewählte Linie (alle ihre Einträge) oder eine
+    einzelne Fahrt. Neue Einträge entstehen weiter über die Fahrt.
+    result = statusId -> (bg, fg) oder None.
+    """
+
+    def __init__(self, master, overrides, statuses):
+        super().__init__(master)
+        self.title("Linienfarben")
+        self.transient(master)
+        self.result = None
+        self.minsize(620, 420)
+        self._ov = dict(overrides or {})
+        self._by_id = {}
+        for status in statuses or []:
+            if isinstance(status, dict):
+                self._by_id[lcp.status_id(status.get("id"))] = status
+        self._sids_of = {}
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(
+            frm,
+            text="Lokale Linienfarben aus line_color_patches.json. Eine Linie "
+                 "ändert alle ihre Einträge, eine aufgeklappte Fahrt nur diese. "
+                 "Neue Farben über die Fahrt im Hauptfenster.",
+            wraplength=590,
+        ).pack(anchor="w")
+
+        wrap = ttk.Frame(frm)
+        wrap.pack(fill="both", expand=True, pady=(8, 0))
+        self.tree = ttk.Treeview(
+            wrap, columns=("operator", "detail", "color"),
+            show="tree headings", selectmode="browse", height=14,
+        )
+        self.tree.heading("#0", text="Linie")
+        self.tree.heading("operator", text="Operator")
+        self.tree.heading("detail", text="Fahrt")
+        self.tree.heading("color", text="Farbe")
+        self.tree.column("#0", width=120, stretch=False)
+        self.tree.column("operator", width=160)
+        self.tree.column("detail", width=240)
+        self.tree.column("color", width=80, stretch=False)
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda _e: self._change())
+
+        edit = ttk.Frame(frm)
+        edit.pack(fill="x", pady=(8, 0))
+        ttk.Button(edit, text="Farbe ändern…", command=self._change).pack(side="left")
+        ttk.Button(edit, text="Löschen", command=self._delete).pack(
+            side="left", padx=6
+        )
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Abbrechen", command=self._cancel).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text="Speichern", command=self._ok).pack(side="right")
+
+        self._fill()
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+
+    def _line_of(self, sid):
+        status = self._by_id.get(sid)
+        if status is None:
+            return "(nicht geladen)", ""
+        checkin = status.get("checkin") or {}
+        operator = (checkin.get("operator") or {}).get("name") or ""
+        return _checkin_bits(status)["line"], operator
+
+    def _detail_of(self, sid):
+        status = self._by_id.get(sid)
+        if status is None:
+            return f"Status {sid}"
+        bits = _checkin_bits(status)
+        return f"{bits['date']}  {bits['origin']} → {bits['dest']}"
+
+    def _color_tag(self, bg, fg):
+        tag = f"c_{bg}_{fg}"
+        self.tree.tag_configure(tag, background="#" + bg, foreground="#" + fg)
+        return tag
+
+    def _fill(self, select=None):
+        self.tree.delete(*self.tree.get_children())
+        self._sids_of = {}
+        groups = {}
+        for sid in self._ov:
+            groups.setdefault(self._line_of(sid), []).append(sid)
+        order = sorted(groups, key=lambda k: (k[0].casefold(), k[1].casefold()))
+        for gi, key in enumerate(order):
+            sids = sorted(groups[key], key=lambda x: self._detail_of(x))
+            colors = {self._ov[sid] for sid in sids}
+            gid = f"g{gi}"
+            if len(colors) == 1:
+                bg, fg = next(iter(colors))
+                tags, shown = (self._color_tag(bg, fg),), "#" + bg
+            else:
+                tags, shown = (), "gemischt"
+            count = f"{len(sids)} Fahrt" + ("" if len(sids) == 1 else "en")
+            self.tree.insert(
+                "", "end", iid=gid, text=key[0], tags=tags,
+                values=(key[1], count, shown), open=len(colors) > 1,
+            )
+            self._sids_of[gid] = sids
+            for sid in sids:
+                bg, fg = self._ov[sid]
+                iid = f"s{sid}"
+                self.tree.insert(
+                    gid, "end", iid=iid, text="", tags=(self._color_tag(bg, fg),),
+                    values=("", self._detail_of(sid), "#" + bg),
+                )
+                self._sids_of[iid] = [sid]
+        if select and self.tree.exists(select):
+            self.tree.selection_set(select)
+            self.tree.see(select)
+
+    def _selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None, []
+        return sel[0], self._sids_of.get(sel[0], [])
+
+    def _change(self):
+        iid, sids = self._selected()
+        if not sids:
+            return
+        line = self._line_of(sids[0])[0]
+        dlg = LineColorDialog(self, line, initial_bg=self._ov[sids[0]][0])
+        self.grab_set()
+        if not dlg.result:
+            return
+        fg = lcp.contrast_text(dlg.result)
+        for sid in sids:
+            self._ov[sid] = (dlg.result, fg)
+        self._fill(select=iid)
+
+    def _delete(self):
+        _iid, sids = self._selected()
+        for sid in sids:
+            self._ov.pop(sid, None)
+        self._fill()
+
+    def _ok(self):
+        self.result = self._ov
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class HomeRegionDialog(tk.Toplevel):
     """Checkbox-Liste aller Operatoren. result = Namensliste oder None."""
 
@@ -1533,6 +1692,10 @@ class EditorApp:
             act, text="Fuhrpark…", command=self._open_vehicle_roster
         )
         self.roster_btn.pack(side="left", padx=8)
+        self.line_colors_btn = ttk.Button(
+            act, text="Linienfarben…", command=self._open_line_colors
+        )
+        self.line_colors_btn.pack(side="left", padx=8)
         ttk.Label(
             act, text="Speichern sendet gestagte Änderungen nach Träwelling"
         ).pack(side="left")
@@ -2572,6 +2735,35 @@ class EditorApp:
         self._set_status(
             f"Heimatregion gespeichert ({n} Operatoren, lokal). "
             "Dashboard neu bauen, damit der Filter sie nutzt."
+        )
+
+    def _open_line_colors(self):
+        overrides = self.line_color_patches.get("overrides") or {}
+        if not overrides:
+            messagebox.showinfo(
+                "Linienfarben",
+                "Noch keine lokalen Linienfarben. Eine Farbe setzt du über "
+                "„Linienfarbe → Ändern“ an einer Fahrt.",
+                parent=self.root,
+            )
+            return
+        dlg = LineColorOverridesDialog(self.root, overrides, self.statuses)
+        self.root.wait_window(dlg)
+        if dlg.result is None:
+            return
+        patches = {"overrides": dlg.result}
+        if not lcp.save_patches(self.line_color_patches_path, patches):
+            messagebox.showerror(
+                "Linienfarben",
+                "line_color_patches.json nicht schreibbar.",
+                parent=self.root,
+            )
+            return
+        self.line_color_patches = patches
+        self._refresh_line_color()
+        self._set_status(
+            f"Linienfarben gespeichert ({len(dlg.result)} Einträge, lokal). "
+            "Dashboard neu bauen, damit sie gelten."
         )
 
     def _open_vehicle_roster(self):

@@ -49,6 +49,58 @@ def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
+def pack_daily(daily):
+    """Kompakte Form von dailyFirsts/dailyRepeats für das eingebettete JSON.
+
+    Kategorien, deren Zeilen überall dieselben Felder mit nur Strings haben,
+    werden zu Index-Listen in eine gemeinsame String-Tabelle; die übrigen
+    bleiben als Objekte. daily.js (`unpackDaily`) baut dieselben Objekte
+    zurück. Form: {fields: {kat: [feld, …]}, strings: [...], days: {datum:
+    {kat: [[idx, …], …] | [obj, …]}}}.
+    """
+    # Tage und Kategorien sortiert, damit die String-Tabelle unabhängig von
+    # der Einfügereihenfolge der Dicts ist (deterministischer Build).
+    shape = {}  # kat -> Feldliste oder None (nicht packbar)
+    for date in sorted(daily):
+        for cat in sorted(daily[date]):
+            for row in daily[date][cat]:
+                fields = list(row) if isinstance(row, dict) else None
+                ok = fields is not None and all(
+                    isinstance(v, str) for v in row.values()
+                )
+                if cat not in shape:
+                    shape[cat] = fields if ok else None
+                elif shape[cat] is not None and (not ok or shape[cat] != fields):
+                    shape[cat] = None
+    strings = []
+    index = {}
+
+    def string_id(value):
+        i = index.get(value)
+        if i is None:
+            i = len(strings)
+            index[value] = i
+            strings.append(value)
+        return i
+
+    days = {}
+    for date in sorted(daily):
+        out = {}
+        for cat in sorted(daily[date]):
+            rows = daily[date][cat]
+            fields = shape.get(cat)
+            if fields:
+                out[cat] = [[string_id(row[f]) for f in fields] for row in rows]
+            else:
+                out[cat] = rows
+        days[date] = out
+    return {
+        "fields": {cat: f for cat, f in shape.items() if f},
+        "strings": strings,
+        "days": days,
+    }
+
+
 def json_for_script(data):
     """Serialisiert `data` so, dass es sicher in einen <script>-Block passt.
 
@@ -86,6 +138,17 @@ def dubi_flags(tags):
         elif key == "dubi=ende" or (key == "dubi" and val == "ende"):
             ende = True
     return start, ende
+
+
+def next_checkin_pairs(statuses):
+    """(statusId, nächste statusId) in Reihenfolge der Check-in-Zeit (createdAt)."""
+    timed = []
+    for s in statuses:
+        created = parse_dt(s.get("createdAt"))
+        if created is not None and s.get("id") is not None:
+            timed.append((created.timestamp(), s.get("id")))
+    timed.sort()
+    return [(a[1], b[1]) for a, b in zip(timed, timed[1:])]
 
 
 def parse_dt(value):
@@ -914,6 +977,16 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
     # Aufsummieren von "Alle" doppelt zählen. Bei Fahrzeug-Filter greift JS
     # auf diese Buckets zu; ohne Filter bleiben edge_lc/node_lc maßgeblich.
     edge_veh = Counter()           # (id_from, id_to, veh_key, *variant) -> Anzahl
+    # Gefahrene Kantenfolgen A→S→B innerhalb einer Fahrt, für die Kurven der
+    # Karten-Pfadmodi (welche Kante an S tatsächlich auf welche folgt).
+    seq_lc = Counter()             # (a_id, s_id, b_id, *variant) -> Anzahl
+    seq_veh = Counter()            # (a_id, s_id, b_id, veh_key, *variant) -> Anzahl
+    # Durchbindung mit Linienwechsel bei gleicher Baureihe: nur für den
+    # Baureihen-Modus, nicht für die Linien.
+    seq_loc = Counter()            # (a_id, s_id, b_id, *variant) -> Anzahl
+    # Erste/letzte Kante je dubi-Fahrt, um Durchbindungen (dubi=ende → dubi=start)
+    # nach der Schleife als gefahrene Folge über zwei Check-ins zu zählen.
+    dubi_ends = {}  # statusId -> (dubi_start, dubi_ende, erste, letzte, lk, variant, veh_keys)
     node_veh = Counter()           # (station_id, veh_key, *variant) -> Befahrungen
     # Entdeckte Kanten je Fahrt/Variante (volle Stopovers minus Check-in dieser
     # Fahrt). Nicht global abziehen: eine auf Linie A befahrene Kante bleibt
@@ -1248,13 +1321,20 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             if lk:
                 _get_dated(station_line, (sid, lk)).add(date_str)
         prev_edge = None
+        first_edge = None
         for a, b in zip(expanded, expanded[1:]):
             a_id, b_id = a.get("id"), b.get("id")
             if a_id is None or b_id is None or a_id == b_id:
                 continue
-            if lk and prev_edge is not None and prev_edge[1] == a_id:
-                line_seq[(lk, prev_edge[0], a_id, b_id)] += 1
+            if prev_edge is not None and prev_edge[1] == a_id:
+                if lk:
+                    line_seq[(lk, prev_edge[0], a_id, b_id)] += 1
+                seq_lc[(prev_edge[0], a_id, b_id, *variant)] += 1
+                for vk in veh_keys:
+                    seq_veh[(prev_edge[0], a_id, b_id, vk, *variant)] += 1
             prev_edge = (a_id, b_id)
+            if first_edge is None:
+                first_edge = prev_edge
             edge_counter[(a_id, b_id)] += 1
             edge_lc[(a_id, b_id, *variant)] += 1
             trip_covered.add((a_id, b_id))
@@ -1277,6 +1357,10 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
                 ve.add(date_str, line=lk)
                 if lk:
                     _get_dated(veh_edge_line, (loc, num, a_id, b_id, lk)).add(date_str)
+        if first_edge is not None and (dubi_start or dubi_ende):
+            dubi_ends[status.get("id")] = (
+                dubi_start, dubi_ende, first_edge, prev_edge, lk, variant, veh_keys
+            )
         if lk:
             path = []
             for s in expanded:
@@ -1598,6 +1682,38 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             [a_id, b_id, variant_id(key[3:]), vehicle_id(vk), count]
         )
 
+    # Durchbindung: folgt auf eine Fahrt mit dubi=ende als nächster Check-in
+    # (createdAt, Fahrplanzeiten können falsch sein) eine Fahrt mit dubi=start
+    # ab derselben Station, gelten beide als eine durchgehende Fahrt.
+    # Linien-Folge nur bei gleicher Linie, Baureihen-Folge bei gleicher
+    # Baureihe, Fahrzeug-Folge für die auf beiden getaggten.
+    for x_id, y_id in next_checkin_pairs(statuses):
+        x, y = dubi_ends.get(x_id), dubi_ends.get(y_id)
+        if not x or not y or not x[1] or not y[0]:
+            continue
+        last, first = x[3], y[2]
+        if first[0] != last[1] or first[1] == last[0]:
+            continue
+        if x[4] and x[4] == y[4]:
+            seq_lc[(last[0], last[1], first[1], *x[5])] += 1
+        elif x[5][1] == y[5][1]:
+            seq_loc[(last[0], last[1], first[1], *x[5])] += 1
+        for vk in set(x[6]) & set(y[6]):
+            seq_veh[(last[0], last[1], first[1], vk, *x[5])] += 1
+
+    map_edge_seqs = [
+        [key[0], key[1], key[2], variant_id(key[3:]), count]
+        for key, count in seq_lc.items()
+    ]
+    map_loc_edge_seqs = [
+        [key[0], key[1], key[2], variant_id(key[3:]), count]
+        for key, count in seq_loc.items()
+    ]
+    map_veh_edge_seqs = [
+        [key[0], key[1], key[2], variant_id(key[4:]), vehicle_id(key[3]), count]
+        for key, count in seq_veh.items()
+    ]
+
     map_disc_edges = []
     for key, count in discovered_lc.items():
         a_id, b_id = key[0], key[1]
@@ -1716,35 +1832,8 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
         )
 
     all_edge_rows = [e.to_row() for e in edge_aggs.values()]
-    # Volle Listen; die UI zeigt initial 40 und lädt den Rest per „Mehr laden“.
-    edges_by_count = sorted(
-        all_edge_rows, key=lambda r: (-r["count"], r["from"], r["to"])
-    )
-    # „Am längsten nicht befahren“ / Einmal-Kanten: nach last aufsteigend
-    # (= meiste Tage her). Absolute „Tage her“ berechnet das Frontend am Systemdatum.
-    edges_by_days = sorted(
-        all_edge_rows,
-        key=lambda r: (r["last"] or "9999", -r["count"], r["from"]),
-    )
-    edges_by_last = sorted(
-        all_edge_rows,
-        key=lambda r: (r["last"] or "", r["from"]),
-        reverse=True,
-    )
-    edges_by_first = sorted(
-        all_edge_rows,
-        key=lambda r: (r["first"] or "9999", r["from"]),
-    )
-    edges_by_first_new = sorted(
-        all_edge_rows,
-        key=lambda r: (r["first"] or "", r["from"]),
-        reverse=True,
-    )
-    edges_once = sorted(
-        [r for r in all_edge_rows if r["count"] == 1],
-        key=lambda r: (r["last"] or "9999", r["from"]),
-    )
-
+    # Eine Liste; stats.js (edgeLists) sortiert daraus die sechs Kanten-
+    # Tabellen. Die Reihenfolge hier entscheidet dort bei Gleichstand.
     def combo_sort_key(r):
         return (-r["count"], r.get("last") or "", r.get("from") or "")
 
@@ -1949,12 +2038,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
         "crossLineDelay": cross_line_delay,
         "crossLocClassDelay": cross_loc_delay,
         "crossVehicleMonth": cross_veh_month,
-        "edgesByCount": edges_by_count,
-        "edgesByDaysSince": edges_by_days,
-        "edgesByLast": edges_by_last,
-        "edgesByFirst": edges_by_first,
-        "edgesByFirstNew": edges_by_first_new,
-        "edgesOnce": edges_once,
+        "edgeRows": all_edge_rows,
         "vehEdgeGt1": veh_edge_gt1,
         "vehEdgeLineGt1": veh_edge_line_gt1,
         "lineEdgeGt1": line_edge_gt1,
@@ -2154,13 +2238,16 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
         "nodes": map_nodes,
         "mapVehicles": map_vehicles,
         "vehEdges": map_veh_edges,
+        "edgeSeqs": map_edge_seqs,
+        "vehEdgeSeqs": map_veh_edge_seqs,
+        "locEdgeSeqs": map_loc_edge_seqs,
         "vehNodes": map_veh_nodes,
         "discoveredEdges": map_disc_edges,
         "discoveredVehEdges": map_disc_veh_edges,
         "segments": segment_ranking,
         "stats": stats,
-        "dailyFirsts": daily_firsts,
-        "dailyRepeats": daily_repeats,
+        "dailyFirsts": pack_daily(daily_firsts),
+        "dailyRepeats": pack_daily(daily_repeats),
         "locClassFamilies": pack_loc_class_families(
             loc_class_families or {}, variants
         ),
@@ -2382,21 +2469,19 @@ def main(argv=None):
         log(f"Operator-Linien-Patches: {args.operator_line_patches} "
             f"enthält keine Regeln.")
 
-    edge_measures = None
-    if n_board:
-        measure_statuses = statuses
-        if (station_patches.get("moves") or station_patches.get("merges")):
-            _stations, measure_statuses, _edges = apply_station_patches(
-                station_patches, stations, statuses, edge_patches
-            )
-        edge_measures = learn_edge_measures(measure_statuses)
+    # Stations-Patches einmal für alle Läufe; build_data bekommt die
+    # gepatchten Kopien und keine Stations-Patches mehr.
+    if station_patches.get("moves") or station_patches.get("merges"):
+        stations, statuses, edge_patches = apply_station_patches(
+            station_patches, stations, statuses, edge_patches
+        )
+    edge_measures = learn_edge_measures(statuses) if n_board else None
 
     data = build_data(
         statuses, stations,
         ignore_plus=args.ignore_plus,
         loc_class_families=loc_class_families,
         edge_patches=edge_patches,
-        station_patches=station_patches,
         line_color_patches=line_color_patches,
         boarding_patches=boarding_patches,
         edge_measures=edge_measures,
@@ -2409,7 +2494,6 @@ def main(argv=None):
             ignore_plus=args.ignore_plus,
             loc_class_families=loc_class_families,
             edge_patches=edge_patches,
-            station_patches=station_patches,
             line_color_patches=line_color_patches,
             boarding_patches=boarding_patches,
             edge_measures=edge_measures,

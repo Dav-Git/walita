@@ -38,8 +38,9 @@ let map=null, mapBounds=[], mapFitted=false;
   // aus DATA.variants) und nur Station-IDs; die Koordinaten liegen einmalig in ST.
   // Fahrzeug-Filter nutzt eigene Buckets (vehEdges/vehNodes), damit Mehrfachwagen
   // bei "Alle" nicht doppelt zählen.
-  let ST={}, VAR=[], FAM={}, VEH=[];
+  let ST={}, VAR=[], FAM={}, VEH=[], LCOL={};
   let rawEdges=[], rawNodes=[], rawVehEdges=[], rawVehNodes=[], rawDisc=[], rawDiscVeh=[];
+  let rawSeqs=[], rawVehSeqs=[], rawLocSeqs=[];
   const DISC="#64748b";
   const lineEl=document.getElementById("mapLine");
   const locEl=document.getElementById("mapLoc");
@@ -154,10 +155,14 @@ let map=null, mapBounds=[], mapFitted=false;
     VAR=src.variants||[];
     FAM=src.locClassFamilies||{};
     VEH=src.mapVehicles||[];
+    LCOL=src.lineColors||{};
     rawEdges=src.edges||[];
     rawNodes=src.nodes||[];
     rawVehEdges=src.vehEdges||[];
     rawVehNodes=src.vehNodes||[];
+    rawSeqs=src.edgeSeqs||[];
+    rawVehSeqs=src.vehEdgeSeqs||[];
+    rawLocSeqs=src.locEdgeSeqs||[];
     rawDisc=src.discoveredEdges||[];
     rawDiscVeh=src.discoveredVehEdges||[];
     const keep={
@@ -222,8 +227,16 @@ let map=null, mapBounds=[], mapFitted=false;
   // Sichtbare Kanten/Knoten aus den passenden Buckets aggregieren. Skala je
   // Ansicht neu aus den sichtbaren Zählwerten (min..max) bestimmen.
   let vEdges=[], vNodes=[], vDiscEdges=[], vMin=1, vMax=1;
-  let vPaths=[], vEdgeSlots=new Map(), vVehColor=new Map(), vVehCount=0;
+  // Pfadmodi (Fahrzeuge, Linien, Baureihen) gruppieren Kanten nach gid: im
+  // Fahrzeugmodus der Index in VEH, sonst der Index in GROUPS (Linienschlüssel
+  // bzw. Baureihe).
+  let vPaths=[], vJoins=[], vEdgeSlots=new Map(), vGroupColor=new Map(), vGroupCount=0, GROUPS=[];
   function isVehicleMode(){ return modeEl && modeEl.value==="vehicle"; }
+  function isLineMode(){ return modeEl && modeEl.value==="line"; }
+  function isLocMode(){ return modeEl && modeEl.value==="loc"; }
+  function isPathMode(){ return isVehicleMode() || isLineMode() || isLocMode(); }
+  // Variante → Gruppenschlüssel im Linien- bzw. Baureihenmodus.
+  function groupKeyOf(vi){ return VAR[vi][isLineMode() ? 0 : 1]; }
   // Knick zwischen zwei gerichteten Kanten an der gemeinsamen Station.
   // 0 = geradeaus. Längen in lon/lat, nur der Winkel zählt.
   function turnAngle(inE, outE){
@@ -233,10 +246,13 @@ let map=null, mapBounds=[], mapFitted=false;
     const dot=(ix/il)*(ox/ol)+(iy/il)*(oy/ol);
     return Math.acos(Math.max(-1, Math.min(1, dot)));
   }
-  // Gerichtete Kanten eines Fahrzeugs zu Pfaden verketten. An einer Station
-  // gewinnt die Fortsetzung mit dem kleinsten Knick; übrige Äste starten neu.
-  function chainPaths(edges){
-    edges.forEach(e=>{ e.next=null; e.prev=null; });
+  // Gerichtete Kanten einer Gruppe zu Pfaden verketten, nur entlang
+  // tatsächlich gefahrener Folgen (seqCount > 0). An einer Station setzt die
+  // häufigste Folge den Pfad fort, bei Gleichstand der kleinere Knick. Weitere
+  // gefahrene Folgen dort werden Abzweig-Kurven (joins). Ohne gefahrene Folge
+  // (Ein-/Ausstieg) beginnt ein neuer Pfad ohne Kurve.
+  function chainPaths(edges, seqCount){
+    edges.forEach(e=>{ e.next=null; e.prev=null; e.joinIn=false; e.joinOut=false; });
     const outs=new Map(), ins=new Map();
     edges.forEach(e=>{
       if(!outs.has(e.aId)) outs.set(e.aId, []);
@@ -245,18 +261,27 @@ let map=null, mapBounds=[], mapFitted=false;
       ins.get(e.bId).push(e);
     });
     const stations=new Set([...outs.keys(), ...ins.keys()]);
+    const joins=[];
     stations.forEach(sid=>{
       const incoming=ins.get(sid)||[], outgoing=outs.get(sid)||[];
       const pairs=[];
       incoming.forEach(inn=>{
         outgoing.forEach(out=>{
-          pairs.push({inn, out, ang:turnAngle(inn, out)});
+          if(out.bId===inn.aId) return;
+          const cnt=seqCount(inn, out);
+          if(cnt>0) pairs.push({inn, out, cnt, ang:turnAngle(inn, out)});
         });
       });
-      pairs.sort((p,q)=>p.ang-q.ang || (p.out.bId<q.out.bId?-1:p.out.bId>q.out.bId?1:0));
+      pairs.sort((p,q)=>q.cnt-p.cnt || p.ang-q.ang
+        || (p.out.bId<q.out.bId?-1:p.out.bId>q.out.bId?1:0));
       const usedIn=new Set(), usedOut=new Set();
       pairs.forEach(p=>{
-        if(usedIn.has(p.inn) || usedOut.has(p.out)) return;
+        if(usedIn.has(p.inn) || usedOut.has(p.out)){
+          p.inn.joinOut=true;
+          p.out.joinIn=true;
+          joins.push({inn:p.inn, out:p.out});
+          return;
+        }
         usedIn.add(p.inn);
         usedOut.add(p.out);
         p.inn.next=p.out;
@@ -276,27 +301,42 @@ let map=null, mapBounds=[], mapFitted=false;
     }
     edges.forEach(e=>{ if(!e.prev) walk(e); });
     edges.forEach(e=>{ if(!seen.has(e)) walk(e); });
-    return paths;
+    return {paths, joins};
   }
   function scale(c){ if(vMax===vMin) return 0.5;
     const t=(Math.log(Math.max(c,1))-Math.log(vMin))/(Math.log(vMax)-Math.log(vMin));
     return Math.max(0, Math.min(1, t)); }
   function computeVisible(){
-    const vehicleMode=isVehicleMode();
+    const pathMode=isPathMode();
     const useVeh=vehEl.value!=="__all__";
     const em=new Map();
-    if(vehicleMode){
+    GROUPS=[];
+    const gidOf=new Map();
+    function addGroupEdge(a, b, gid, cnt){
+      const sa=ST[a], sb=ST[b];
+      if(a===b || !sa || !sb) return;
+      const key=gid+"|"+a+"|"+b, cur=em.get(key);
+      if(cur) cur.count+=cnt;
+      else em.set(key,{
+        a:[sa[0],sa[1]], b:[sb[0],sb[1]], aId:a, bId:b,
+        from:sa[2], to:sb[2], count:cnt, gid, key:a+"|"+b,
+      });
+    }
+    if(isVehicleMode()){
       rawVehEdges.forEach(row=>{
-        const a=row[0], b=row[1], vi=row[2], vhi=row[3], cnt=row[4];
-        if(a===b || !matchesVar(vi) || !matchesVeh(vhi)) return;
-        const sa=ST[a], sb=ST[b];
-        if(!sa||!sb) return;
-        const key=vhi+"|"+a+"|"+b, cur=em.get(key);
-        if(cur) cur.count+=cnt;
-        else em.set(key,{
-          a:[sa[0],sa[1]], b:[sb[0],sb[1]], aId:a, bId:b,
-          from:sa[2], to:sb[2], count:cnt, vehIdx:vhi, key:a+"|"+b,
-        });
+        if(!matchesVar(row[2]) || !matchesVeh(row[3])) return;
+        addGroupEdge(row[0], row[1], row[3], row[4]);
+      });
+    } else if(pathMode){
+      // Mit Fahrzeugfilter aus den Fahrzeug-Buckets, sonst aus den Kanten,
+      // damit Mehrfachtraktion eine Fahrt nicht doppelt zählt.
+      (useVeh ? rawVehEdges : rawEdges).forEach(row=>{
+        const vi=row[2];
+        if(!matchesVar(vi) || (useVeh && !matchesVeh(row[3]))) return;
+        const gk=groupKeyOf(vi);
+        let gid=gidOf.get(gk);
+        if(gid==null){ gid=GROUPS.length; GROUPS.push(gk); gidOf.set(gk, gid); }
+        addGroupEdge(row[0], row[1], gid, useVeh ? row[4] : row[3]);
       });
     } else if(useVeh){
       rawVehEdges.forEach(row=>{
@@ -353,36 +393,57 @@ let map=null, mapBounds=[], mapFitted=false;
     // genau diesem Filter nicht schon als befahren in em liegt (Linie A
     // befahren / Linie B nur Laufweg → bei B grau, bei „Alle“ Heatmap).
     vPaths=[];
+    vJoins=[];
     vEdgeSlots=new Map();
-    vVehCount=0;
-    if(vehicleMode){
-      const byVeh=new Map();
+    vGroupCount=0;
+    if(pathMode){
+      const byGroup=new Map();
       vEdges.forEach(e=>{
-        if(!byVeh.has(e.vehIdx)) byVeh.set(e.vehIdx, []);
-        byVeh.get(e.vehIdx).push(e);
+        if(!byGroup.has(e.gid)) byGroup.set(e.gid, []);
+        byGroup.get(e.gid).push(e);
         let slots=vEdgeSlots.get(e.key);
         if(!slots){ slots=[]; vEdgeSlots.set(e.key, slots); }
-        if(slots.indexOf(e.vehIdx)<0) slots.push(e.vehIdx);
+        if(slots.indexOf(e.gid)<0) slots.push(e.gid);
       });
       // Nur Mitfahrer dieser Kante, und nur solche, die der aktuelle Filter
-      // noch zeigt. Ausgeblendete Fahrzeuge lassen keine leere Spur zurück.
+      // noch zeigt. Ausgeblendete Gruppen lassen keine leere Spur zurück.
       vEdgeSlots.forEach(list=>list.sort((a,b)=>
-        vehSortKey(a).localeCompare(vehSortKey(b), undefined, {numeric:true})));
-      vVehCount=byVeh.size;
-      // Farbkreis nur über diesen Filter. Die Wagennummer wählt den Ton nicht:
-      // wer dieselbe Kante teilt, liegt möglichst weit auseinander.
-      assignVehicleColors([...byVeh.keys()]);
-      [...byVeh.keys()].sort((a,b)=>
-        vehSortKey(a).localeCompare(vehSortKey(b), undefined, {numeric:true}))
-        .forEach(idx=>{
-          chainPaths(byVeh.get(idx)).forEach(edges=>{
-            vPaths.push({vehIdx:idx, edges});
-          });
+        groupSortKey(a).localeCompare(groupSortKey(b), undefined, {numeric:true})));
+      vGroupCount=byGroup.size;
+      assignGroupColors([...byGroup.keys()]);
+      // Gefahrene Folgen A→S→B je Gruppe unter dem aktuellen Filter.
+      const seqs=new Map();
+      const addSeq=(gid, a, sid, b, cnt)=>{
+        const k=gid+"|"+a+"|"+sid+"|"+b;
+        seqs.set(k, (seqs.get(k)||0)+cnt);
+      };
+      if(isVehicleMode()){
+        rawVehSeqs.forEach(row=>{
+          if(!matchesVar(row[3]) || !matchesVeh(row[4])) return;
+          addSeq(row[4], row[0], row[1], row[2], row[5]);
+        });
+      } else {
+        const rows=useVeh ? rawVehSeqs
+          : (isLocMode() ? rawSeqs.concat(rawLocSeqs) : rawSeqs);
+        rows.forEach(row=>{
+          const vi=row[3];
+          if(!matchesVar(vi) || (useVeh && !matchesVeh(row[4]))) return;
+          const gid=gidOf.get(groupKeyOf(vi));
+          if(gid!=null) addSeq(gid, row[0], row[1], row[2], useVeh ? row[5] : row[4]);
+        });
+      }
+      const seqCount=(inn, out)=>seqs.get(inn.gid+"|"+inn.aId+"|"+inn.bId+"|"+out.bId)||0;
+      [...byGroup.keys()].sort((a,b)=>
+        groupSortKey(a).localeCompare(groupSortKey(b), undefined, {numeric:true}))
+        .forEach(gid=>{
+          const chained=chainPaths(byGroup.get(gid), seqCount);
+          chained.paths.forEach(edges=>vPaths.push({gid, edges}));
+          chained.joins.forEach(j=>vJoins.push({gid, inn:j.inn, out:j.out}));
         });
     }
     vDiscEdges=[];
     if(discEl && discEl.checked){
-      const riddenKeys=vehicleMode ? new Set(vEdges.map(e=>e.key)) : new Set(em.keys());
+      const riddenKeys=pathMode ? new Set(vEdges.map(e=>e.key)) : new Set(em.keys());
       const dm=new Map();
       if(useVeh){
         rawDiscVeh.forEach(row=>{
@@ -439,7 +500,7 @@ let map=null, mapBounds=[], mapFitted=false;
   // (Rechtsverkehr), dazwischen eine feste Lücke. Weitere Fahrzeuge derselben
   // Richtung stapeln nach außen, nicht in die Gegenrichtung. Kurvenradius in
   // Pixeln, damit er beim Zoom konstant bleibt.
-  const VEH_WEIGHT=3, CURVE_R=16, BADGE_MIN_PX=28, VEH_DIR_GAP=10, BADGE_MAX=3, BADGE_REPEAT=220;
+  const VEH_WEIGHT=3, CURVE_R=16, VEH_DIR_GAP=10, BADGE_MAX=3, BADGE_INSET=12;
   function hueGap(a, b){
     const d=Math.abs(a-b)%360;
     return d>180 ? 360-d : d;
@@ -467,14 +528,27 @@ let map=null, mapBounds=[], mapFitted=false;
     const Y=0.2126*lin(f(0))+0.7152*lin(f(8))+0.0722*lin(f(4));
     return Y>0.45 ? "#1c1917" : "#fff";
   }
-  // Gleichmäßige Palette für genau die Fahrzeuge des aktuellen Filters.
+  // Linienmodus: Farbe der Linie aus den Check-ins (inkl. Linienfarben-Patch).
+  // Linien ohne Farbe und alle Fahrzeuge bekommen die Palette.
+  function assignGroupColors(ids){
+    vGroupColor=new Map();
+    if(isLineMode()){
+      const rest=[];
+      ids.forEach(gid=>{
+        const c=LCOL[GROUPS[gid]];
+        if(c && c[0]) vGroupColor.set(gid, {bg:c[0], fg:c[1]||badgeInk(c[0])});
+        else rest.push(gid);
+      });
+      assignPaletteColors(rest);
+    } else assignPaletteColors(ids);
+  }
+  // Gleichmäßige Palette für genau die Gruppen des aktuellen Filters.
   // Zuteilung nach gemeinsamen Kanten, nicht nach Baureihe oder Nummer.
-  function assignVehicleColors(ids){
-    vVehColor=new Map();
+  function assignPaletteColors(ids){
     const n=ids.length;
     if(!n) return;
     if(n===1){
-      vVehColor.set(ids[0], vividCss(210));
+      setPalette(ids[0], 210);
       return;
     }
     const palette=[];
@@ -520,14 +594,28 @@ let map=null, mapBounds=[], mapFitted=false;
       used[bestSlot]=true;
       hueOf.set(idx, palette[bestSlot]);
     });
-    hueOf.forEach((hue, idx)=>vVehColor.set(idx, vividCss(hue)));
+    hueOf.forEach((hue, idx)=>setPalette(idx, hue));
   }
-  function vehicleColor(idx){
-    return vVehColor.get(idx) || "#64748b";
+  function setPalette(gid, hue){
+    const bg=vividCss(hue);
+    vGroupColor.set(gid, {bg, fg:badgeInk(bg)});
   }
-  function vehicleBadgeText(idx){
-    const v=VEH[idx];
+  function groupColor(gid){
+    return vGroupColor.get(gid) || {bg:"#64748b", fg:"#fff"};
+  }
+  function groupBadgeText(gid){
+    if(isLineMode()) return lineName(GROUPS[gid]||"") || "–";
+    if(isLocMode()) return GROUPS[gid] || "–";
+    const v=VEH[gid];
     return (v && v[1]) ? v[1] : "–";
+  }
+  function groupSortKey(gid){
+    if(isLineMode()){
+      const k=GROUPS[gid]||"";
+      return lineName(k)+" "+(lineOperator(k)||"");
+    }
+    if(isLocMode()) return GROUPS[gid]||"";
+    return vehSortKey(gid);
   }
   function vehSortKey(idx){
     const v=VEH[idx]||["",""];
@@ -575,18 +663,26 @@ let map=null, mapBounds=[], mapFitted=false;
     } else c=L.point(hit.x, hit.y);
     return sampleQuad(p0, c, p2, 8);
   }
-  function slotOf(key, vehIdx){
-    const list=vEdgeSlots.get(key)||[vehIdx];
-    const slot=list.indexOf(vehIdx);
+  function slotOf(key, gid){
+    const list=vEdgeSlots.get(key)||[gid];
+    const slot=list.indexOf(gid);
     return slot<0?0:slot;
   }
   function pathPopup(path, edge){
-    const v=VEH[path.vehIdx]||["",""];
-    const num=v[1]||"–";
-    const loc=v[0] ? ("BR "+esc(v[0])+"<br>") : "";
+    let head;
+    if(isLineMode()){
+      const k=GROUPS[path.gid]||"", op=lineOperator(k);
+      head="<b>"+esc(lineName(k)||"(ohne Linie)")+"</b><br>"+(op ? esc(op)+"<br>" : "");
+    } else if(isLocMode()){
+      const loc=GROUPS[path.gid]||"";
+      head="<b>"+(loc ? "BR "+esc(loc) : "(ohne Baureihe)")+"</b><br>";
+    } else {
+      const v=VEH[path.gid]||["",""];
+      head="<b>"+esc(v[1]||"–")+"</b><br>"+(v[0] ? ("BR "+esc(v[0])+"<br>") : "");
+    }
     const route=esc(path.edges[0].from)+" → "+path.edges.map(e=>esc(e.to)).join(" → ");
     const leg=esc(edge.from)+" → "+esc(edge.to);
-    return "<b>"+esc(num)+"</b><br>"+loc+route+"<br>"+leg+": "+edge.count+"× befahren";
+    return head+route+"<br>"+leg+": "+edge.count+"× befahren";
   }
   function addArrow(g, col, weight, fromPt, toPt){
     const m=L.point((fromPt.x+toPt.x)/2, (fromPt.y+toPt.y)/2);
@@ -596,10 +692,10 @@ let map=null, mapBounds=[], mapFitted=false;
     L.polyline([ll(wingL),ll(tip),ll(wingR)],
       {color:col, weight:weight, opacity:.9, interactive:false}).addTo(overlay);
   }
-  function addBadge(pt, text, col, vehIdx){
+  function addBadge(pt, text, col, gid){
     const icon=L.divIcon({
       className:"map-veh-badge",
-      html:'<span data-veh="'+vehIdx+'" style="background:'+col+';color:'+badgeInk(col)+'">'+esc(text)+"</span>",
+      html:'<span data-gid="'+gid+'" style="background:'+col.bg+';color:'+col.fg+'">'+esc(text)+"</span>",
       iconSize:[0,0],
       iconAnchor:[0,0],
     });
@@ -647,11 +743,18 @@ let map=null, mapBounds=[], mapFitted=false;
       }
     }
   }
-  // Sichtbarer Ausschnitt in Layer-Pixeln. Badges außerhalb zählen nicht.
-  function clipToView(a, b){
+  // Sichtbarer Ausschnitt in Layer-Pixeln. Kandidaten liegen BADGE_INSET
+  // innerhalb (x0..y1); ein Badge muss ganz in den Ausschnitt passen (ox0..oy1).
+  function viewRect(){
     const origin=map.containerPointToLayerPoint(L.point(0, 0));
     const size=map.getSize();
-    const maxX=origin.x+size.x, maxY=origin.y+size.y;
+    return {
+      x0:origin.x+BADGE_INSET, y0:origin.y+BADGE_INSET,
+      x1:origin.x+size.x-BADGE_INSET, y1:origin.y+size.y-BADGE_INSET,
+      ox0:origin.x, oy0:origin.y, ox1:origin.x+size.x, oy1:origin.y+size.y,
+    };
+  }
+  function clipToView(a, b, v){
     let t0=0, t1=1;
     const dx=b.x-a.x, dy=b.y-a.y;
     function clip(p, q){
@@ -661,80 +764,102 @@ let map=null, mapBounds=[], mapFitted=false;
       else { if(t<t0) return false; if(t<t1) t1=t; }
       return true;
     }
-    if(!clip(-dx, a.x-origin.x) || !clip(dx, maxX-a.x) || !clip(-dy, a.y-origin.y) || !clip(dy, maxY-a.y))
+    if(!clip(-dx, a.x-v.x0) || !clip(dx, v.x1-a.x) || !clip(-dy, a.y-v.y0) || !clip(dy, v.y1-a.y))
       return null;
     const ax=a.x+dx*t0, ay=a.y+dy*t0;
     const bx=a.x+dx*t1, by=a.y+dy*t1;
     const len=Math.hypot(bx-ax, by-ay);
-    if(len<1) return null;
-    return {a:L.point(ax,ay), b:L.point(bx,by), ux:(bx-ax)/len, uy:(by-ay)/len, len};
+    return {a:L.point(ax,ay), ux:len ? (bx-ax)/len : 0, uy:len ? (by-ay)/len : 0, len};
   }
-  function inView(x, y){
-    const origin=map.containerPointToLayerPoint(L.point(0, 0));
-    const size=map.getSize();
-    return x>=origin.x && y>=origin.y && x<=origin.x+size.x && y<=origin.y+size.y;
+  function inView(p, v){
+    return p.x>=v.x0 && p.y>=v.y0 && p.x<=v.x1 && p.y<=v.y1;
   }
-  // Alle Kandidaten im festen Abstand entlang des Pfads, danach nur die im Ausschnitt.
-  function badgeCandidates(segs){
+  // Dichte Punkte entlang des sichtbaren Pfads in Fahrtrichtung, damit ein
+  // Badge bei Überdeckung weiterwandern kann. Ohne sichtbares gerades Stück
+  // (nur Kurve) gilt die Kantenmitte.
+  function pathSamples(segs, edgeMids, v){
+    const step=8;
     const pts=[];
-    let travel=0, nextAt=BADGE_REPEAT/2;
     segs.forEach(seg=>{
-      const start=travel;
-      travel+=seg.len;
-      while(nextAt<=travel+1e-6){
-        const at=nextAt-start;
-        if(at>=0 && at<=seg.len){
-          const x=seg.a.x+seg.ux*at, y=seg.a.y+seg.uy*at;
-          if(inView(x, y)) pts.push({x, y});
-        }
-        nextAt+=BADGE_REPEAT;
+      const c=clipToView(seg.a, seg.b, v);
+      if(!c) return;
+      for(let at=0; at<=c.len+1e-6; at+=step){
+        const t=Math.min(at, c.len);
+        pts.push({x:c.a.x+c.ux*t, y:c.a.y+c.uy*t});
       }
     });
+    if(!pts.length){
+      const mid=edgeMids.find(p=>inView(p, v));
+      if(mid) pts.push({x:mid.x, y:mid.y});
+    }
     return pts;
   }
-  // Nächster Punkt, der von den schon gewählten am weitesten entfernt ist.
-  function farthestBadge(pool, chosen){
-    if(!chosen.length){
-      const cx=pool.reduce((s,p)=>s+p.x,0)/pool.length;
-      const cy=pool.reduce((s,p)=>s+p.y,0)/pool.length;
-      let best=pool[0], bd=-1;
-      pool.forEach(p=>{
-        const d=(p.x-cx)**2+(p.y-cy)**2;
-        if(d>bd){ bd=d; best=p; }
-      });
-      return best;
+  // Reihenfolge der Versuche: Mitte des Pfads, dann abwechselnd nach vorn
+  // und hinten.
+  function fromMiddle(pool){
+    const mid=Math.floor((pool.length-1)/2);
+    const order=[pool[mid]];
+    for(let d=1; order.length<pool.length; d++){
+      if(mid+d<pool.length) order.push(pool[mid+d]);
+      if(mid-d>=0) order.push(pool[mid-d]);
     }
-    let best=null, bd=-1;
-    pool.forEach(p=>{
-      let md=Infinity;
-      chosen.forEach(c=>{
-        const d=(p.x-c.x)**2+(p.y-c.y)**2;
-        if(d<md) md=d;
-      });
-      if(md>bd){ bd=md; best=p; }
-    });
-    return best;
+    return order;
   }
-  function drawVehiclePaths(){
+  function minDist2(p, chosen){
+    let md=Infinity;
+    chosen.forEach(c=>{
+      const d=(p.x-c.x)**2+(p.y-c.y)**2;
+      if(d<md) md=d;
+    });
+    return md;
+  }
+  function drawGroupPaths(){
     const badgeQueue=[];
+    const geomOf=new Map();
+    vPaths.forEach(path=>path.edges.forEach(e=>
+      geomOf.set(e, offsetGeom(e, slotOf(e.key, path.gid)))));
+    // Kantenenden mit Fortsetzung oder Abzweig enden vor der Station; die
+    // Abzweig-Kurven setzen an diesen gekürzten Enden an.
+    const trimOf=new Map();
     vPaths.forEach(path=>{
-      const col=vehicleColor(path.vehIdx);
-      const geoms=path.edges.map(e=>{
-        return offsetGeom(e, slotOf(e.key, path.vehIdx));
-      });
+      const geoms=path.edges.map(e=>geomOf.get(e));
       const n=geoms.length;
-      const trim=geoms.map((g,i)=>{
+      path.edges.forEach((e,i)=>{
+        const g=geoms[i];
         let r0=0, r1=0;
         if(i>0) r0=Math.min(CURVE_R, geoms[i-1].len*0.45, g.len*0.45);
+        else if(e.joinIn) r0=Math.min(CURVE_R, g.len*0.45);
         if(i<n-1) r1=Math.min(CURVE_R, g.len*0.45, geoms[i+1].len*0.45);
-        return {r0, r1};
+        else if(e.joinOut) r1=Math.min(CURVE_R, g.len*0.45);
+        trimOf.set(e, {r0, r1});
       });
+    });
+    vJoins.forEach(j=>{
+      const g0=geomOf.get(j.inn), g1=geomOf.get(j.out);
+      const r=Math.min(CURVE_R, g0.len*0.45, g1.len*0.45);
+      if(r<1) return;
+      const t0=trimOf.get(j.inn), t1=trimOf.get(j.out);
+      const pts=[L.point(g0.ob.x-g0.ux*t0.r1, g0.ob.y-g0.uy*t0.r1)]
+        .concat(curvePoints(g0, g1, r))
+        .concat([L.point(g1.oa.x+g1.ux*t1.r0, g1.oa.y+g1.uy*t1.r0)]);
+      L.polyline(pts.map(ll),{
+        color:groupColor(j.gid).bg, weight:VEH_WEIGHT, opacity:.9,
+        lineCap:"round", smoothFactor:0, interactive:false,
+      }).addTo(overlay);
+    });
+    vPaths.forEach(path=>{
+      const pal=groupColor(path.gid), col=pal.bg;
+      const geoms=path.edges.map(e=>geomOf.get(e));
+      const n=geoms.length;
+      const trim=path.edges.map(e=>trimOf.get(e));
       const segs=[];
+      const edgeMids=[];
       path.edges.forEach((e,i)=>{
         const g=geoms[i], r0=trim[i].r0, r1=trim[i].r1;
         const a=L.point(g.oa.x+g.ux*r0, g.oa.y+g.uy*r0);
         const b=L.point(g.ob.x-g.ux*r1, g.ob.y-g.uy*r1);
         const straight=Math.hypot(b.x-a.x, b.y-a.y);
+        edgeMids.push(L.point((g.oa.x+g.ob.x)/2, (g.oa.y+g.ob.y)/2));
         if(straight>=1){
           L.polyline([ll(a),ll(b)],{
             color:col, weight:VEH_WEIGHT, opacity:.9, lineCap:"round", smoothFactor:0
@@ -752,40 +877,67 @@ let map=null, mapBounds=[], mapFitted=false;
           curve.addTo(overlay);
         }
       });
-      if(segs.length){
-        let longest=0;
-        segs.forEach(s=>{ if(s.len>longest) longest=s.len; });
-        badgeQueue.push({vehIdx:path.vehIdx, text:vehicleBadgeText(path.vehIdx), col, segs, longest});
-      }
-    });
-    const byVeh=new Map();
-    badgeQueue.forEach(item=>{
-      let g=byVeh.get(item.vehIdx);
-      if(!g){ g={text:item.text, col:item.col, vehIdx:item.vehIdx, segs:[], pool:[]}; byVeh.set(item.vehIdx, g); }
-      item.segs.forEach(seg=>g.segs.push(seg));
-      badgeCandidates(item.segs).forEach(p=>g.pool.push(p));
-    });
-    const grid=new Map();
-    byVeh.forEach(g=>{
-      const size=badgeBox(g.text);
-      const pool=g.pool;
-      if(!pool.length){
-        g.segs.forEach(seg=>{
-          const c=clipToView(seg.a, seg.b);
-          if(!c || c.len<BADGE_MIN_PX) return;
-          pool.push({x:(c.a.x+c.b.x)/2, y:(c.a.y+c.b.y)/2});
+      if(segs.length || edgeMids.length){
+        badgeQueue.push({
+          gid:path.gid, text:groupBadgeText(path.gid), col:pal, segs, edgeMids,
         });
       }
-      const open=pool.slice();
-      const shown=[];
-      while(shown.length<BADGE_MAX && open.length){
-        const pick=farthestBadge(open, shown);
-        open.splice(open.indexOf(pick), 1);
-        const box={x:pick.x, y:pick.y, w:size.w, h:size.h};
-        if(badgeHits(grid, box)) continue;
-        badgeKeep(grid, box);
-        addBadge(L.point(pick.x, pick.y), g.text, g.col, g.vehIdx);
-        shown.push(pick);
+    });
+    const view=viewRect();
+    // Abstand zwischen Badges auf demselben Pfad, damit ihre Zahl der
+    // sichtbaren Strecke im Verhältnis zum Ausschnitt folgt.
+    const spacing=Math.min(view.x1-view.x0, view.y1-view.y0)/2;
+    const byGroup=new Map();
+    badgeQueue.forEach(item=>{
+      const pool=pathSamples(item.segs, item.edgeMids, view);
+      if(!pool.length) return;
+      let g=byGroup.get(item.gid);
+      if(!g){
+        g={text:item.text, col:item.col, gid:item.gid, paths:[], extra:[], count:0};
+        g.size=badgeBox(g.text);
+        byGroup.set(item.gid, g);
+      }
+      g.paths.push(pool);
+    });
+    const grid=new Map();
+    function place(g, pick){
+      const box={x:pick.x, y:pick.y, w:g.size.w, h:g.size.h};
+      if(box.x-box.w/2<view.ox0 || box.x+box.w/2>view.ox1
+        || box.y-box.h/2<view.oy0 || box.y+box.h/2>view.oy1) return null;
+      if(badgeHits(grid, box)) return null;
+      badgeKeep(grid, box);
+      addBadge(L.point(pick.x, pick.y), g.text, g.col, g.gid);
+      g.count++;
+      return pick;
+    }
+    // Erst bekommt jeder sichtbare Pfad aller Fahrzeuge ein Badge, möglichst
+    // in seiner Mitte. Liegt dort schon eines, rückt es entlang des Pfads.
+    byGroup.forEach(g=>{
+      g.paths.forEach(pool=>{
+        for(const p of fromMiddle(pool)){
+          const got=place(g, p);
+          if(got){ g.extra.push({pool, shown:[got]}); break; }
+        }
+      });
+    });
+    // Danach weitere Badges bis BADGE_MAX pro Fahrzeug. Ein weiteres Badge
+    // braucht den Abstand zu den Badges seines eigenen Pfads und sitzt dort,
+    // wo es am weitesten von ihnen entfernt ist.
+    const minD2=spacing*spacing;
+    byGroup.forEach(g=>{
+      const open=[];
+      g.extra.forEach(path=>path.pool.forEach(p=>open.push({p, path})));
+      while(g.count<BADGE_MAX){
+        let best=-1, bd=-1;
+        open.forEach((c,i)=>{
+          const d=minDist2(c.p, c.path.shown);
+          if(d>=minD2 && d>bd){ bd=d; best=i; }
+        });
+        if(best<0) break;
+        const c=open[best];
+        open.splice(best, 1);
+        const got=place(g, c.p);
+        if(got) c.path.shown.push(got);
       }
     });
   }
@@ -804,7 +956,7 @@ let map=null, mapBounds=[], mapFitted=false;
       L.polyline([ll(wingL),ll(tip),ll(wingR)],
         {color:DISC,weight:2,opacity:.8,interactive:false}).addTo(overlay);
     });
-    if(isVehicleMode()) drawVehiclePaths();
+    if(isPathMode()) drawGroupPaths();
     else vEdges.forEach(e=>{
       const t=scale(e.count), col=color(t), weight=3+t*7;
       const g=edgeGeom(e, weight);
@@ -826,7 +978,7 @@ let map=null, mapBounds=[], mapFitted=false;
       const held=(n.heldCount||0)>0;
       const passed=(n.passCount||0)>0;
       const heldOnly=held && !used;
-      const col=isVehicleMode()
+      const col=isPathMode()
         ? (used?"#1e293b":"#3d5a80")
         : (used?color(scale(n.usedCount)):"#3d5a80");
       const parts=[`${n.count}× befahren`];
@@ -850,7 +1002,13 @@ let map=null, mapBounds=[], mapFitted=false;
       <i style="background:#fff;width:10px;height:10px;border-radius:50%;border:1.5px solid #000;box-sizing:border-box"></i> gehalten<br>
       <i style="background:#3d5a80;width:8px;height:8px;border-radius:50%;opacity:.75"></i> nur physische Durchfahrt`;
     let html;
-    if(isVehicleMode()){
+    if(isLocMode()){
+      html=`<b>Baureihen</b><br>
+        <span class="muted">Farbe = Baureihe<br>Badge = Baureihe<br>Pfeil = Fahrtrichtung<br>großer Punkt = Ein-/Ausstieg</span>`+roles;
+    } else if(isLineMode()){
+      html=`<b>Linien</b><br>
+        <span class="muted">Farbe = Linienfarbe<br>Badge = Linie<br>Pfeil = Fahrtrichtung<br>großer Punkt = Ein-/Ausstieg</span>`+roles;
+    } else if(isVehicleMode()){
       html=`<b>Fahrzeuge</b><br>
         <span class="muted">Farbe = Fahrzeug<br>Badge = Nummer<br>Pfeil = Fahrtrichtung<br>großer Punkt = Ein-/Ausstieg</span>`+roles;
     } else {
@@ -879,8 +1037,8 @@ let map=null, mapBounds=[], mapFitted=false;
     draw();
     updateLegend();
     const disc=(discEl && discEl.checked) ? " · "+vDiscEdges.length+" entdeckt" : "";
-    countEl.textContent = isVehicleMode()
-      ? vVehCount+" Fahrzeuge · "+vEdges.length+" Segmente"+disc
+    countEl.textContent = isPathMode()
+      ? vGroupCount+(isLineMode()?" Linien · ":isLocMode()?" Baureihen · ":" Fahrzeuge · ")+vEdges.length+" Segmente"+disc
       : vEdges.length+" Segmente"+disc;
   }
   applyScope();

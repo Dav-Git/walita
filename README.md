@@ -363,6 +363,13 @@ Farbe (Träwelling / lokal / keine). **Ändern** öffnet Hex-Eingabe und
 Farbwähler; die Textfarbe wird aus dem Kontrast gesetzt. **Zurücksetzen**
 entfernt nur den lokalen Patch.
 
+**Linienfarben…** (Leiste unten) listet alle vorhandenen lokalen Linienfarben,
+gruppiert nach Linie und Operator, jede Zeile in ihrer Farbe. **Farbe
+ändern…** (oder Doppelklick) auf einer Linie ändert alle ihre Einträge, auf
+einer aufgeklappten Fahrt nur diese; **Löschen** entfernt entsprechend.
+Erst **Speichern** schreibt `data/line_color_patches.json`. Neue Farben
+entstehen weiter über die Fahrt.
+
 ### Einstiegs-Patches
 
 Träwelling legt den Einstieg in `checkin.origin` fest. Liegt der tatsächliche
@@ -528,10 +535,27 @@ zusammengefügt. Sieben Ansichten:
   Mehrere Fahrzeuge auf derselben gerichteten Kante stapeln sich nach
   außen, die Lücke bleibt frei. Im Stapel stehen nur Fahrzeuge, die der
   aktuelle Filter noch zeigt. Nur in diesem Modus werden Kanten desselben Fahrzeugs über
-  Zwischenstationen mit einer Kurve verbunden (geradeaus zuerst, Abzweige
-  als neuer Pfad). Die Nummer wird entlang der Linie vorgemerkt und im
-  sichtbaren Ausschnitt höchstens dreimal gezeigt, an den Stellen, die
-  möglichst weit über die Karte verteilt sind. Überdeckungen entfallen. Gehaltene Stationen ohne Ein-/Ausstieg erscheinen als weißer Kreis
+  Zwischenstationen mit einer Kurve verbunden, und zwar nur dort, wo eine
+  Fahrt unter dem aktuellen Filter tatsächlich von der einen Kante auf die
+  andere weitergefahren ist. Die häufigste Folge setzt den Pfad fort, jede
+  weitere gefahrene Folge an der Station wird als Abzweig ebenfalls mit einer
+  Kurve angebunden (als eigener Pfad). Wo nur ein- oder ausgestiegen wurde,
+  gibt es keine Kurve. Eine Durchbindung (`dubi=ende`, als nächster Check-in
+  nach Check-in-Zeit `dubi=start` ab derselben Station) gilt als durchgehende
+  Fahrt: bei Fahrzeugen, die auf beiden getaggt sind, im Linienmodus bei
+  gleicher Linie, im Baureihenmodus bei gleicher Baureihe. **Linien** zeichnet genauso, nur je Linie statt je
+  Fahrzeug: Farbe ist die Linienfarbe aus den Check-ins (inklusive
+  Linienfarben-Patch), Linien ohne Farbe bekommen den Farbkreis, das Badge
+  zeigt den Liniennamen. **Baureihen** gruppiert ebenso nach Baureihe
+  (Farbkreis, Badge = Baureihe). Mit Fahrzeugfilter zählen nur dessen
+  Fahrten. In allen drei Modi gilt: Badges überlappen sich nie. Jeder
+  sichtbare Pfad bekommt ein Badge, auch auf einem kurzen Abschnitt, möglichst
+  in seiner Mitte. Liegt dort schon ein anderes, rückt es entlang des Pfads
+  auf die nächste freie Stelle; ohne freie Stelle entfällt es. Weitere
+  Badges (höchstens drei pro Fahrzeug bzw. Linie) gibt es nur auf Pfaden, die im
+  Ausschnitt lang genug sind: zwischen zwei Badges desselben Pfads liegt
+  mindestens die halbe kürzere Seite der Karte. Badges liegen ganz in der
+  Karte, mit Abstand zum Rand. Gehaltene Stationen ohne Ein-/Ausstieg erscheinen als weißer Kreis
   mit schwarzem Rand, reine physische Durchfahrten als kleiner, gedämpfter Punkt.
   Die Checkbox **Entdeckte Kanten** (Standard aus) legt in Grau
   gerichtete Stopover-Paare darüber, die unter dem aktuellen Filter nicht

@@ -501,31 +501,100 @@ let map=null, mapBounds=[], mapFitted=false;
   // Richtung stapeln nach außen, nicht in die Gegenrichtung. Kurvenradius in
   // Pixeln, damit er beim Zoom konstant bleibt.
   const VEH_WEIGHT=3, CURVE_R=16, VEH_DIR_GAP=10, BADGE_MAX=3, BADGE_INSET=12;
-  function hueGap(a, b){
-    const d=Math.abs(a-b)%360;
-    return d>180 ? 360-d : d;
+  // Farbring in OKLCH: je Ton die kräftigste Farbe im sRGB-Raum, Helligkeit
+  // nahe der Gamut-Spitze (Gelb hell, Blau dunkler), aber begrenzt, damit
+  // Grün und Cyan nicht grell werden. Um Gelb steigt die Grenze bis zur
+  // Spitze von #ffd500, damit ein sattes Gelb dabei ist; dort beginnt der Ring.
+  // Abstände: Helligkeit, Chroma und Tonwinkel bei fester Referenz-Chroma.
+  // Die volle OKLab-Strecke würde die sehr chromareichen Töne (Magenta, Pink)
+  // überproportional oft vergeben.
+  const RING_L_MIN=0.55, RING_L_MAX=0.80, RING_C_REF=0.12;
+  const RING_YELLOW=94.46, RING_YELLOW_L=0.883, RING_YELLOW_W=60;
+  function ringLMax(h){
+    const d=Math.min(Math.abs(h-RING_YELLOW), 360-Math.abs(h-RING_YELLOW));
+    if(d>=RING_YELLOW_W) return RING_L_MAX;
+    const k=0.5+0.5*Math.cos(Math.PI*d/RING_YELLOW_W);
+    return RING_L_MAX+(RING_YELLOW_L-RING_L_MAX)*k;
   }
-  // Volle Sättigung. Gelb und Grün brauchen mehr Helligkeit, sonst werden sie oliv.
-  function vividCss(hue){
-    const h=((hue%360)+360)%360;
-    const ang=center=>Math.min(Math.abs(h-center), 360-Math.abs(h-center));
-    const near=(center, width)=>Math.max(0, 1-ang(center)/width);
-    const y=near(52, 42), g=near(122, 48);
-    const L=Math.round(43+14*Math.max(y, g*0.45));
-    const S=Math.round(86+14*Math.max(y, g*0.7));
-    return "hsl("+Math.round(h)+","+S+"%,"+L+"%)";
+  function oklchToLinear(L, C, h){
+    const a=C*Math.cos(h*Math.PI/180), b=C*Math.sin(h*Math.PI/180);
+    const l=Math.pow(L+0.3963377774*a+0.2158037573*b, 3);
+    const m=Math.pow(L-0.1055613458*a-0.0638541728*b, 3);
+    const s=Math.pow(L-0.0894841775*a-1.2914855480*b, 3);
+    return [
+      4.0767416621*l-3.3077115913*m+0.2309699292*s,
+      -1.2684380046*l+2.6097574011*m-0.3413193965*s,
+      -0.0041960863*l-0.7034186147*m+1.7076147010*s,
+    ];
+  }
+  function inGamut(L, C, h){
+    return oklchToLinear(L, C, h).every(v=>v>=-1e-4 && v<=1+1e-4);
+  }
+  function maxChroma(L, h){
+    let lo=0, hi=0.4;
+    for(let i=0;i<20;i++){
+      const mid=(lo+hi)/2;
+      if(inGamut(L, mid, h)) lo=mid; else hi=mid;
+    }
+    return lo;
+  }
+  function linearToHex(rgb){
+    const enc=c=>{
+      c=Math.max(0, Math.min(1, c));
+      c=c<=0.0031308 ? 12.92*c : 1.055*Math.pow(c, 1/2.4)-0.055;
+      return Math.round(c*255).toString(16).padStart(2, "0");
+    };
+    return "#"+rgb.map(enc).join("");
+  }
+  let colorRing=null;
+  function getColorRing(){
+    if(colorRing) return colorRing;
+    const pts=[];
+    for(let i=0;i<360;i++){
+      const h=(RING_YELLOW+i)%360;
+      let cuspL=RING_L_MIN, cuspC=0;
+      for(let L=0.3;L<=0.98;L+=0.005){
+        const c=maxChroma(L, h);
+        if(c>cuspC){ cuspC=c; cuspL=L; }
+      }
+      const L=Math.max(RING_L_MIN, Math.min(ringLMax(h), cuspL));
+      const C=maxChroma(L, h)*0.995;
+      pts.push({L, C, a:C*Math.cos(h*Math.PI/180), b:C*Math.sin(h*Math.PI/180)});
+    }
+    const arc=[0], step=RING_C_REF*Math.PI/180;
+    for(let i=1;i<=360;i++){
+      const p=pts[i-1], q=pts[i%360];
+      arc.push(arc[i-1]+Math.hypot(q.L-p.L, q.C-p.C, step));
+    }
+    colorRing={pts, arc};
+    return colorRing;
+  }
+  // t ∈ [0,1): Anteil am Ring, 0 = Gelb (#ffd500).
+  function ringColor(t){
+    const {pts, arc}=getColorRing();
+    const target=(((t%1)+1)%1)*arc[360];
+    let i=1;
+    while(i<360 && arc[i]<target) i++;
+    const f=(target-arc[i-1])/((arc[i]-arc[i-1])||1);
+    const p=pts[i-1], q=pts[i%360];
+    const L=p.L+(q.L-p.L)*f, a=p.a+(q.a-p.a)*f, b=p.b+(q.b-p.b)*f;
+    const lms=[
+      Math.pow(L+0.3963377774*a+0.2158037573*b, 3),
+      Math.pow(L-0.1055613458*a-0.0638541728*b, 3),
+      Math.pow(L-0.0894841775*a-1.2914855480*b, 3),
+    ];
+    return linearToHex([
+      4.0767416621*lms[0]-3.3077115913*lms[1]+0.2309699292*lms[2],
+      -1.2684380046*lms[0]+2.6097574011*lms[1]-0.3413193965*lms[2],
+      -0.0041960863*lms[0]-0.7034186147*lms[1]+1.7076147010*lms[2],
+    ]);
   }
   function badgeInk(col){
-    const m=/hsl\(\s*([\d.]+),\s*([\d.]+)%,\s*([\d.]+)%/.exec(col||"");
+    const m=/^#([0-9a-f]{6})$/i.exec((col||"").trim());
     if(!m) return "#fff";
-    const H=+m[1], S=+m[2]/100, L=+m[3]/100;
-    const a=S*Math.min(L, 1-L);
-    const f=n=>{
-      const k=(n+H/30)%12;
-      return L-a*Math.max(-1, Math.min(k-3, 9-k, 1));
-    };
     const lin=c=>c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4);
-    const Y=0.2126*lin(f(0))+0.7152*lin(f(8))+0.0722*lin(f(4));
+    const ch=k=>lin(parseInt(m[1].slice(k, k+2), 16)/255);
+    const Y=0.2126*ch(0)+0.7152*ch(2)+0.0722*ch(4);
     return Y>0.45 ? "#1c1917" : "#fff";
   }
   // Linienmodus: Farbe der Linie aus den Check-ins (inkl. Linienfarben-Patch).
@@ -542,62 +611,159 @@ let map=null, mapBounds=[], mapFitted=false;
       assignPaletteColors(rest);
     } else assignPaletteColors(ids);
   }
-  // Gleichmäßige Palette für genau die Gruppen des aktuellen Filters.
-  // Zuteilung nach gemeinsamen Kanten, nicht nach Baureihe oder Nummer.
+  // Gleichmäßige Palette für genau die Gruppen des aktuellen Filters: jede
+  // Gruppe einen eigenen Slot, der Kreis ist damit global gleich verteilt.
+  // Welche Gruppe welchen Slot bekommt, entscheidet die Nachbarschaft auf der
+  // Karte (nicht Baureihe oder Nummer): gemeinsame Kante (beide Richtungen),
+  // gemeinsame Station und regionale Nähe über Rasterzellen mehrerer Größen.
+  // Paris und Wien sieht man nie zugleich, also dürfen sie ähnliche Töne haben.
+  const PAL_EDGE_W=4, PAL_STOP_W=2, PAL_GAP_SCALE=45, PAL_BUDGET_MS=150;
+  const PAL_CELLS=[[3, 1], [12, 0.6], [40, 0.3]];  // [Zellgröße km, Gewicht]
+  function paletteWeights(ids){
+    const n=ids.length, pos=new Map();
+    ids.forEach((gid, i)=>pos.set(gid, i));
+    const w=new Map();  // i*n+j (i<j) -> Gewicht
+    const add=(i, j, v)=>{
+      if(i===j) return;
+      const k=i<j ? i*n+j : j*n+i;
+      w.set(k, (w.get(k)||0)+v);
+    };
+    // Mitglieder je Schlüssel; binär (Kante/Station) oder als Kosinus-Überlappung
+    // (Zellen), damit lange Läufe kurze nicht erdrücken.
+    const groupsBy=keyFns=>{
+      const by=new Map(), size=new Array(n).fill(0);
+      vEdges.forEach(e=>{
+        const i=pos.get(e.gid);
+        if(i==null) return;
+        keyFns(e).forEach(key=>{
+          let s=by.get(key);
+          if(!s){ s=new Set(); by.set(key, s); }
+          if(!s.has(i)){ s.add(i); size[i]++; }
+        });
+      });
+      return {by, size};
+    };
+    const pairs=(by, fn)=>by.forEach(set=>{
+      const list=[...set];
+      for(let a=0;a<list.length;a++)
+        for(let b=a+1;b<list.length;b++) fn(list[a], list[b]);
+    });
+    const binary=(by, v)=>{
+      const seen=new Set();
+      pairs(by, (i, j)=>{
+        const k=i<j ? i*n+j : j*n+i;
+        if(seen.has(k)) return;
+        seen.add(k);
+        add(i, j, v);
+      });
+    };
+    binary(groupsBy(e=>[e.aId<e.bId ? e.aId+"|"+e.bId : e.bId+"|"+e.aId]).by, PAL_EDGE_W);
+    binary(groupsBy(e=>[e.aId, e.bId]).by, PAL_STOP_W);
+    const cellOf=(p, km)=>{
+      const y=p[0]*111.2, x=p[1]*111.2*Math.cos(p[0]*Math.PI/180);
+      return Math.floor(x/km)+","+Math.floor(y/km);
+    };
+    PAL_CELLS.forEach(([km, v])=>{
+      const {by, size}=groupsBy(e=>[cellOf(e.a, km), cellOf(e.b, km)]);
+      const shared=new Map();
+      pairs(by, (i, j)=>{
+        const k=i<j ? i*n+j : j*n+i;
+        shared.set(k, (shared.get(k)||0)+1);
+      });
+      shared.forEach((c, k)=>{
+        const i=Math.floor(k/n), j=k%n;
+        add(i, j, v*c/Math.sqrt(size[i]*size[j]));
+      });
+    });
+    const nb=Array.from({length:n}, ()=>[]);
+    w.forEach((v, k)=>{
+      const i=Math.floor(k/n), j=k%n;
+      nb[i].push([j, v]);
+      nb[j].push([i, v]);
+    });
+    return nb.map(list=>({
+      idx:Int32Array.from(list, x=>x[0]),
+      w:Float64Array.from(list, x=>x[1]),
+    }));
+  }
   function assignPaletteColors(ids){
     const n=ids.length;
     if(!n) return;
     if(n===1){
-      setPalette(ids[0], 210);
+      setPalette(ids[0], 0.62);
       return;
     }
-    const palette=[];
-    // Bei Gelb anfangen, damit der Kreis Gelb und Grün nicht auslässt.
-    for(let i=0;i<n;i++) palette.push((52+Math.round(i*360/n))%360);
-    const conflicts=new Map();
-    ids.forEach(idx=>conflicts.set(idx, new Set()));
-    vEdgeSlots.forEach(list=>{
-      for(let i=0;i<list.length;i++){
-        for(let j=i+1;j<list.length;j++){
-          const a=list[i], b=list[j];
-          if(!conflicts.has(a) || !conflicts.has(b)) continue;
-          conflicts.get(a).add(b);
-          conflicts.get(b).add(a);
-        }
+    // Strafe je Slot-Abstand (Ringanteil in Grad): nahe Töne teuer, ab etwa
+    // einem Viertel des Rings fast egal.
+    const pen=new Float64Array(n);
+    for(let d=0;d<n;d++){
+      const gap=Math.min(d, n-d)*360/n;
+      pen[d]=Math.exp(-gap/PAL_GAP_SCALE);
+    }
+    const nb=paletteWeights(ids);
+    const slot=new Int32Array(n).fill(-1);
+    const used=new Uint8Array(n);
+    const cost=(i, s)=>{
+      const {idx, w}=nb[i];
+      let c=0;
+      for(let k=0;k<idx.length;k++){
+        const t=slot[idx[k]];
+        if(t>=0) c+=w[k]*pen[(s-t+n)%n];
       }
+      return c;
+    };
+    // Gierig: stärkste Nachbarschaft zuerst, freier Slot mit kleinster Strafe.
+    // Gleichstand: größter Abstand zu allen vergebenen Slots.
+    const total=nb.map(x=>x.w.reduce((a, b)=>a+b, 0));
+    const order=[...Array(n).keys()].sort((a, b)=>total[b]-total[a] || a-b);
+    const far=new Int32Array(n).fill(n);  // Abstand zum nächsten vergebenen Slot
+    order.forEach(i=>{
+      let best=-1, bestC=Infinity;
+      for(let s=0;s<n;s++){
+        if(used[s]) continue;
+        const c=cost(i, s);
+        if(c<bestC-1e-12 || (c<=bestC+1e-12 && far[s]>far[best])){ best=s; bestC=c; }
+      }
+      slot[i]=best;
+      used[best]=1;
+      for(let s=0;s<n;s++) far[s]=Math.min(far[s], (s-best+n)%n, (best-s+n)%n);
     });
-    const hueOf=new Map();
-    const used=new Array(n).fill(false);
-    const order=ids.slice().sort((a,b)=>conflicts.get(b).size-conflicts.get(a).size);
-    order.forEach(idx=>{
-      const mates=conflicts.get(idx);
-      let bestSlot=0, bestScore=-1;
-      for(let si=0; si<n; si++){
-        if(used[si]) continue;
-        const hue=palette[si];
-        let score=360, saw=false;
-        mates.forEach(other=>{
-          const prev=hueOf.get(other);
-          if(prev==null) return;
-          saw=true;
-          const gap=hueGap(hue, prev);
-          if(gap<score) score=gap;
-        });
-        if(!saw){
-          hueOf.forEach(prev=>{
-            const gap=hueGap(hue, prev);
-            if(gap<score) score=gap;
+    // Feinjustierung über die Gesamtverteilung: Slots paarweise tauschen,
+    // solange die Summe der Strafen sinkt (Zeitbudget, damit Filtern flüssig
+    // bleibt). C[i*n+s] = Strafe, wenn i auf Slot s läge.
+    const W=new Float32Array(n*n), C=new Float32Array(n*n);
+    nb.forEach(({idx, w}, i)=>{ for(let k=0;k<idx.length;k++) W[i*n+idx[k]]=w[k]; });
+    for(let i=0;i<n;i++) for(let s=0;s<n;s++) C[i*n+s]=cost(i, s);
+    const deadline=performance.now()+PAL_BUDGET_MS;
+    let improved=true;
+    while(improved && performance.now()<deadline){
+      improved=false;
+      for(let i=0;i<n;i++){
+        if(!nb[i].idx.length) continue;
+        for(let j=i+1;j<n;j++){
+          const si=slot[i], sj=slot[j], wij=W[i*n+j];
+          // Das Paar i–j behält seinen Abstand; nur der Eigenanteil in C fällt weg.
+          const delta=C[i*n+sj]+C[j*n+si]-C[i*n+si]-C[j*n+sj]
+            -2*wij*pen[0]+2*wij*pen[(si-sj+n)%n];
+          if(delta>=-1e-6) continue;
+          slot[i]=sj; slot[j]=si;
+          improved=true;
+          const touched=new Set([...nb[i].idx, ...nb[j].idx]);
+          touched.forEach(k=>{
+            const f=W[k*n+i]-W[k*n+j];
+            if(!f) return;
+            const row=k*n;
+            for(let s=0;s<n;s++)
+              C[row+s]+=f*(pen[(s-sj+n)%n]-pen[(s-si+n)%n]);
           });
         }
-        if(score>bestScore){ bestScore=score; bestSlot=si; }
+        if(performance.now()>deadline) break;
       }
-      used[bestSlot]=true;
-      hueOf.set(idx, palette[bestSlot]);
-    });
-    hueOf.forEach((hue, idx)=>setPalette(idx, hue));
+    }
+    ids.forEach((gid, i)=>setPalette(gid, slot[i]/n));
   }
-  function setPalette(gid, hue){
-    const bg=vividCss(hue);
+  function setPalette(gid, t){
+    const bg=ringColor(t);
     vGroupColor.set(gid, {bg, fg:badgeInk(bg)});
   }
   function groupColor(gid){

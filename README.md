@@ -526,11 +526,16 @@ zusammengefügt. Sieben Ansichten:
   Dicke und Farbe zeigen, wie oft ein Segment befahren wurde, der Pfeil die
   Richtung. Das Dropdown **Darstellung** schaltet auf **Fahrzeuge**: je
   Fahrzeug eine eigene Farbe. Der Farbkreis umfasst nur die Fahrzeuge des
-  aktuellen Filters und wird beim Filterwechsel neu vergeben, beginnend bei
-  Gelb, damit auch Gelb und Grün vorkommen. Diese beiden bleiben gesättigt
-  und hell genug, dass sie nicht oliv wirken. Fahrzeuge auf
-  derselben Kante bekommen möglichst weit auseinanderliegende Töne; die
-  Wagennummer legt die Farbe nicht fest. Die Linien bleiben gerichtet und im Rechtsverkehr
+  aktuellen Filters und wird beim Filterwechsel neu vergeben. Die Farben
+  liegen in gleichen wahrgenommenen Abständen (OKLCH), nicht in gleichen
+  Farbwinkeln, sodass Grün und Blau nicht überwiegen und Gelb, Türkis und
+  Orange genauso oft vorkommen und Pink nicht überwiegt; jede Farbe ist so
+  kräftig, wie der Bildschirm-Farbraum es zulässt. Der Ring beginnt bei
+  sattem Gelb (#ffd500). Fahrzeuge, die auf der
+  Karte nah beieinanderliegen (gleiche Kante, auch in Gegenrichtung,
+  gemeinsame Station, gleiche Region), bekommen möglichst weit
+  auseinanderliegende Töne; weit entfernte Fahrzeuge dürfen ähnliche Farben
+  haben. Die Wagennummer legt die Farbe nicht fest. Die Linien bleiben gerichtet und im Rechtsverkehr
   versetzt, mit einer sichtbaren Lücke zwischen den beiden Richtungen.
   Mehrere Fahrzeuge auf derselben gerichteten Kante stapeln sich nach
   außen, die Lücke bleibt frei. Im Stapel stehen nur Fahrzeuge, die der

@@ -160,7 +160,7 @@ neu eingeloggt.
 | --- | --- |
 | `--open` | Dashboard im Browser öffnen (**Default**) |
 | `--no-open` | Nicht im Browser öffnen |
-| `--ignore-plus` | Wagennummern-Tags nicht am `+` trennen (Doppeltraktion = ein Fahrzeug) |
+| `--ignore-plus` | `+` in Wagennummern **nicht** als Doppeltraktion trennen (Standard: `463001+463501` = zwei Fahrzeuge, siehe [Doppeltraktion](#doppeltraktion)) |
 | `--loc-class-families PFAD` | Baureihe→Familie für den Kartenfilter (Default `data/loc_class_families.txt`; JSON-Objekt, gleiche Baureihe darf mehrfach vorkommen) |
 | `--edge-patches PFAD` | [Kanten-Patches](#kanten-patches-physische-via-stationen) (Default `data/edge_patches.json`) |
 | `--station-patches PFAD` | [Stations-Patches](#stations-patches-koordinaten-und-merges) (Default `data/station_patches.json`) |
@@ -634,10 +634,6 @@ zusammengefügt. Sieben Ansichten:
 Linien, Fahrten, Fahrzeuge und Tagesziele haben **Als TSV kopieren** für die
 gerade sichtbare Tabelle (zum Einfügen in eine Tabellenkalkulation).
 
-Wagennummern: Trennung immer an `,` / `;`; standardmäßig auch an `+`
-(`463001+463501` → zwei Fahrzeuge). Mit `--ignore-plus` bleibt Doppeltraktion
-ein Eintrag.
-
 Nur Dashboard neu bauen:
 
 ```bash
@@ -652,6 +648,15 @@ python3 build_dashboard.py --home-region data/home_region.json --open
 python3 build_dashboard.py --vehicle-roster data/vehicle_roster.json --open
 python3 build_dashboard.py --operator-line-patches data/operator_line_patches.json --open
 ```
+
+### Doppeltraktion
+
+> **`+` trennt standardmäßig zwei Fahrzeuge.**
+> Eine Fahrzeugnummer wie `463001+463501` zählt als **zwei** Wagen: jeder hat
+> eine eigene Zeile auf der Fahrzeuge-Seite, einen eigenen Pfad auf der Karte
+> und eigene Einträge in den Statistiken. `,` und `;` trennen immer
+> (`381, 382`). Ist das `+` Teil einer einzigen Nummer, mit `--ignore-plus`
+> bauen; dann trennen nur noch `,` und `;`.
 
 ## Tag-Editor
 
@@ -674,7 +679,7 @@ Rechts stehen die Details der gewählten Fahrt in einklappbaren Gruppen:
 
 | Gruppe | Inhalt | Ziel |
 | --- | --- | --- |
-| Fahrzeug | Baureihe (Auswahl oder frei), Nummer, Hinweis ob im Fuhrpark | Träwelling |
+| Fahrzeug | Baureihe (Auswahl oder frei), Nummer ([Doppeltraktion](#doppeltraktion) mit `+`, z.B. `463001+463501`), Hinweis ob im Fuhrpark | Träwelling |
 | Fahrtverlauf | Einstieg, Durchbindung (`dubi=start` / `dubi=ende`), Kanten mit **Auf Karte anreichern** und **Patch entfernen ▾** | lokal (Durchbindung: Träwelling) |
 | Darstellung | Linienfarbe | lokal |
 | Text & Tags | Status-Text, weitere Tags (Sitz, Wagen, …) | Träwelling |

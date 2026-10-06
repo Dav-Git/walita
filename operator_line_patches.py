@@ -22,7 +22,7 @@ def load_rules(path):
     if not path or not os.path.isfile(path):
         return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(
@@ -117,7 +117,7 @@ def load_document(path):
     rules = load_rules(path)
     comments = []
     if path and os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         comments = [
             (k, v) for k, v in data.items()

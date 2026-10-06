@@ -40,7 +40,7 @@ def load_operators(path):
     if not path or not os.path.isfile(path):
         return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError):
         return []

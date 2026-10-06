@@ -50,7 +50,7 @@ def load_patches(path):
     if not path or not os.path.isfile(path):
         return empty_patches()
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError):
         return empty_patches()

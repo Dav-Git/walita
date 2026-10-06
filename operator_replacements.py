@@ -22,7 +22,7 @@ def load_document(path):
     if not path or not os.path.isfile(path):
         return doc
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f, object_pairs_hook=list)
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(f"Operator-Ersetzungen {path} nicht lesbar: {e}") from e

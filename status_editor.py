@@ -399,6 +399,19 @@ def in_period(status, key, today):
     return True
 
 
+WEEKDAYS = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+
+
+def weekday_label(ts):
+    """Kurzer Wochentag eines ISO-Zeitstempels (Ortszeit des Stempels) oder ""."""
+    if not isinstance(ts, str) or len(ts) < 10:
+        return ""
+    try:
+        return WEEKDAYS[datetime.date.fromisoformat(ts[:10]).weekday()]
+    except ValueError:
+        return ""
+
+
 def split_vehicle_numbers(text):
     return [n.strip() for n in re.split(r"[,;+]", text or "") if n.strip()]
 
@@ -410,12 +423,15 @@ def roster_hint(roster, loc_class, number_text):
         return ""
     by_number = {e.get("number"): e for e in entries}
     missing = [n for n in numbers if n not in by_number]
+    withdrawn = [
+        n for n in numbers if n in by_number and by_number[n].get("withdrawn")
+    ]
+    parts = []
     if missing:
-        return "⚠ nicht im Fuhrpark: " + ", ".join(missing)
-    withdrawn = [n for n in numbers if by_number[n].get("withdrawn")]
+        parts.append("⚠ nicht im Fuhrpark: " + ", ".join(missing))
     if withdrawn:
-        return "ausgemustert: " + ", ".join(withdrawn)
-    return "✓ im Fuhrpark"
+        parts.append("ausgemustert: " + ", ".join(withdrawn))
+    return " · ".join(parts) or "✓ im Fuhrpark"
 
 
 def patch_markers(status, boarding, colors, edges):
@@ -1065,6 +1081,7 @@ class EditorApp:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build()
+        self._apply_filter()
         self._show_page(self.ui_state.get("page") or "trips:all")
         kids = self.trips.get_children()
         if kids:
@@ -1216,6 +1233,9 @@ class EditorApp:
             self.nav.see(key)
         if page == "trips":
             self._set_trip_view(key)
+            if not self._sash_restored:
+                self._sash_restored = True
+                self.root.after_idle(self._restore_sash)
         else:
             self.settings_pages[page].reload()
 
@@ -1266,7 +1286,7 @@ class EditorApp:
         self.trips_panes.add(right_outer, weight=2)
         self._build_trip_list(left)
         self._build_detail(right_outer)
-        self.root.after_idle(self._restore_sash)
+        self._sash_restored = False
 
     def _build_trip_list(self, left):
         filt = ttk.Frame(left)
@@ -1425,6 +1445,7 @@ class EditorApp:
             widget.bind("<Return>", lambda _e: self._on_vehicle_field())
         self.loc_box.bind("<<ComboboxSelected>>", lambda _e: self._on_vehicle_field())
         self.veh_var.trace_add("write", lambda *_: self._update_roster_hint())
+        self.loc_var.trace_add("write", lambda *_: self._update_roster_hint())
         self._ignore_vehicle = False
         self._refresh_vehicle_fields()
 
@@ -1699,7 +1720,9 @@ class EditorApp:
                 (s for s in self.statuses if s.get("id") == status_id), None
             )
         else:
-            status = es.find_status_with_edge(self.statuses, from_id, to_id)
+            status = es.find_status_with_edge(
+                self.statuses, from_id, to_id, self.patches
+            )
         if status is None:
             messagebox.showinfo(
                 "Kanten", "Keine Fahrt über diese Kante gefunden.", parent=self.root,
@@ -1825,6 +1848,10 @@ class EditorApp:
     def _after_save_done(self):
         """Liste, Zähler und Fußzeile nach dem Speichern neu aufbauen."""
         self._apply_filter()
+
+    def _refresh_current_row(self):
+        if self.current is not None:
+            self._refresh_trip_row(self.current)
 
     def _update_footer(self):
         n_dirty = sum(1 for s in self.filtered if self._status_dirty(s))
@@ -2012,7 +2039,14 @@ class EditorApp:
         shown = self._shown(status)
         bits = _checkin_bits(shown)
         self.title_var.set(f"{bits['line']} · {bits['origin']} → {bits['dest']}")
-        parts = [f"{_fmt_when(bits['dep'])} → {_fmt_when(bits['arr'])}"]
+        dep, arr = bits["dep"], bits["arr"]
+        arr_text = (
+            arr[11:16] if isinstance(arr, str) and isinstance(dep, str)
+            and len(arr) >= 16 and arr[:10] == dep[:10] else _fmt_when(arr)
+        )
+        when = f"{_fmt_when(dep)} → {arr_text}"
+        day = weekday_label(dep)
+        parts = [f"{day} {when}" if day else when]
         if operator_of(status):
             parts.append(operator_of(status))
         dist = ((status.get("checkin") or {}).get("distance") or 0) / 1000.0
@@ -2186,6 +2220,7 @@ class EditorApp:
             )
             return
         self._refresh_line_color()
+        self._refresh_trip_row(self.current)
         self._set_status("Linienfarbe gespeichert (lokal).")
 
     def _reset_line_color(self):
@@ -2204,6 +2239,7 @@ class EditorApp:
             )
             return
         self._refresh_line_color()
+        self._refresh_trip_row(self.current)
         self._set_status("Linienfarbe zurückgesetzt (lokal).")
 
     def _refresh_boarding(self):
@@ -2366,6 +2402,7 @@ class EditorApp:
         def apply():
             self.patches = patches
             self._refresh_edges()
+            self._apply_filter()
             self._reload_visible_page("settings:edges")
             self._set_status("Kanten-Patch gespeichert (lokal).")
         try:
@@ -2518,6 +2555,7 @@ class EditorApp:
             )
             return
         self._refresh_edges()
+        self._refresh_current_row()
         self._set_status("Standard-Patch gelöscht.")
 
     def _clear_edge_override(self):
@@ -2537,6 +2575,7 @@ class EditorApp:
             )
             return
         self._refresh_edges()
+        self._refresh_current_row()
         self._set_status("Fahrt-Override gelöscht.")
 
     def _col_at(self, event):
@@ -2687,18 +2726,24 @@ class EditorApp:
             ))
 
         def done(statuses):
-            self.statuses[:] = statuses
-            self.current = None
-            self._fill_filter_choices()
-            self._reset_baselines()
-            self._apply_filter()
-            kids = self.trips.get_children()
-            if kids:
-                self.trips.selection_set(kids[0])
-                self._on_select()
-            self._set_status(f"{len(statuses)} Fahrten von der API geladen.")
+            self._after_reload(statuses)
 
         self._run_async(work, done, busy_msg="Lade Fahrten von der API …")
+
+    def _after_reload(self, statuses):
+        self.statuses[:] = statuses
+        self.current = None
+        self._fill_filter_choices()
+        self._reset_baselines()
+        self._apply_filter()
+        kids = self.trips.get_children()
+        if kids:
+            self.trips.selection_set(kids[0])
+            self._on_select()
+        page = self.ui_state.get("page", "")
+        if page.startswith("settings:"):
+            self._reload_visible_page(page)
+        self._set_status(f"{len(statuses)} Fahrten von der API geladen.")
 
     def _dirty_statuses(self):
         self._commit_edit()

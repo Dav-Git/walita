@@ -12,8 +12,6 @@ schreibt sie unter `data/` und erzeugt daraus ein in sich geschlossenes
 **HTML-Dashboard**. Daneben gibt es einen **Tag-Editor** (`--edit`), der Tags
 und den Status-Text live auf Träwelling ändert.
 
-![Karte des Dashboards mit Befahrungs-Heatmap](docs/screenshots/02-karte-berlin.jpg)
-
 Die beiden Stufen können auch einzeln genutzt werden:
 
 | Skript | Aufgabe |
@@ -21,14 +19,17 @@ Die beiden Stufen können auch einzeln genutzt werden:
 | `walita.py` | Export + Dashboard (empfohlen); `--edit` startet den Tag-Editor |
 | `download_statuses.py` | Stufe 1: API → `statuses.json` / `stations.json` / `trips.json` |
 | `build_dashboard.py` | Stufe 2: JSON → `dashboard.html` |
-| `status_editor.py` | Tags und Status-Text live auf Träwelling ändern; Kanten-, Stations-, Linienfarben- und Einstiegs-Patches, Heimatregion, Fuhrpark |
+| `status_editor.py` | Tag-Editor: Tags und Status-Text live auf Träwelling ändern, alle lokalen Patches und Einstellungen pflegen |
+| `editor_settings.py` | Einstellungsseiten des Tag-Editors, eine je Konfig-Datei |
 | `edge_patches.py` | Lokale Via-Patches (Default/Override) für grobe Kanten |
 | `station_patches.py` | Lokale Stations-Patches (Koordinaten verschieben, IDs mergen) |
 | `line_color_patches.py` | Lokale Linienfarben-Patches je Status |
 | `boarding_patches.py` | Lokale Einstiegs-Patches je Status |
 | `home_region.py` | Lokale Operator-Liste der Heimatregion |
 | `vehicle_roster.py` | Lokaler Fuhrpark: Fahrzeugnummern je Baureihe |
-| `operator_line_patches.py` | Operator einer Linie überschreiben (Sonderfälle, Datei) |
+| `operator_line_patches.py` | Operator einer Linie überschreiben (Sonderfälle) |
+| `operator_replacements.py` | Betreibernamen vereinheitlichen (laden/speichern) |
+| `loc_class_families.py` | Baureihenfamilien für den Kartenfilter (laden/speichern) |
 | `auth.py` | OAuth (Authorization Code + PKCE), von den anderen Skripten genutzt |
 
 ## Installation
@@ -70,7 +71,6 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── examples/              # Demo-Dataset (eingecheckt, siehe Demo)
 │   ├── statuses.json
 │   └── stations.json
-├── docs/screenshots/      # Bilder fürs README
 ├── data/                  # generierte Artefakte – nicht im Repo (.gitignore)
 ├── README.md · LICENSE · .gitignore · .gitattributes
 ```
@@ -162,6 +162,15 @@ neu eingeloggt.
 | `--no-open` | Nicht im Browser öffnen |
 | `--ignore-plus` | Wagennummern-Tags nicht am `+` trennen (Doppeltraktion = ein Fahrzeug) |
 | `--loc-class-families PFAD` | Baureihe→Familie für den Kartenfilter (Default `data/loc_class_families.txt`; JSON-Objekt, gleiche Baureihe darf mehrfach vorkommen) |
+| `--edge-patches PFAD` | [Kanten-Patches](#kanten-patches-physische-via-stationen) (Default `data/edge_patches.json`) |
+| `--station-patches PFAD` | [Stations-Patches](#stations-patches-koordinaten-und-merges) (Default `data/station_patches.json`) |
+| `--line-color-patches PFAD` | [Linienfarben-Patches](#linienfarben-patches) (Default `data/line_color_patches.json`) |
+| `--boarding-patches PFAD` | [Einstiegs-Patches](#einstiegs-patches) (Default `data/boarding_patches.json`) |
+| `--home-region PFAD` | [Heimatregion](#heimatregion) (Default `data/home_region.json`) |
+| `--vehicle-roster PFAD` | [Fuhrpark](#fuhrpark) (Default `data/vehicle_roster.json`) |
+| `--operator-line-patches PFAD` | [Operator je Linie](#operator-je-linie) (Default `data/operator_line_patches.json`) |
+
+Die Pfade gelten auch für `--edit`; der Editor liest und schreibt dieselben Dateien.
 
 ### Modi
 
@@ -185,11 +194,12 @@ Version: `python3 walita.py --version`.
 
 ## Was der Export erzeugt
 
-Unter `data/` (Ordner wird bei Bedarf angelegt):
+Unter `data/` (Ordner wird bei Bedarf angelegt) liegen die exportierten Daten
+und alle lokalen Einstellungen. Fehlt eine Einstellungsdatei, gilt sie als leer.
 
 | Datei | Inhalt |
 | --- | --- |
-| `statuses.json` | Alle (gefilterten) Statuses; bei erfolgreichem Trip-Nachladen inkl. `trip.stopovers` |
+| `statuses.json` | Alle Statuses (mit `--since` nur ab dem Stichtag); bei erfolgreichem Trip-Nachladen inkl. `trip.stopovers`. Liegt die Datei schon vor, lädt der Export nur neue Statuses und die letzten 2 Tage |
 | `stations.json` | `station_id → {name, lat, lon, identifiers}` für die Karte; Identifier (IBNR, DHID/IFOPT, MOTIS, …) per `GET /station/{id}?withIdentifiers=true` |
 | `trips.json` | Persistenter Cache der Zwischenhalte, je Trip-ID |
 | `dashboard.html` | Selbstständiges Dashboard (von `walita` / `build_dashboard`) |
@@ -199,6 +209,10 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 | `boarding_patches.json` | Lokaler Einstieg je Status (Tag-Editor; kein API-Write) |
 | `home_region.json` | Operatoren der Heimatregion (Tag-Editor; kein API-Write) |
 | `vehicle_roster.json` | Fuhrpark: Fahrzeugnummern je Baureihe (Tag-Editor; kein API-Write) |
+| `operator_replacements.json` | Betreibernamen Rohname → kanonischer Name, beim Export angewandt (Tag-Editor) |
+| `operator_line_patches.json` | Operator je Linie, beim Dashboard-Bau angewandt (Tag-Editor) |
+| `loc_class_families.txt` | Baureihe → Familie für den Kartenfilter (Tag-Editor) |
+| `editor_state.json` | Oberflächenzustand des Tag-Editors (Sortierung, Spalten, letzte Seite) |
 | `oauth_token.json` | OAuth Access-/Refresh-Token (gitignored) |
 
 ### Ablauf (Stufe 1)
@@ -212,7 +226,8 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
    Was davor liegt, bleibt aus der Datei; Statuses im neu geladenen Bereich,
    die die API nicht liefert, gelten als gelöscht. Wer eine ältere Fahrt
    nachträglich ändert oder eincheckt, lädt mit `--full` alles neu. `--limit`
-   lädt ebenfalls ohne Abgleich mit der Datei.
+   lädt ebenfalls ohne Abgleich mit der Datei. Mit `--since` werden auch die
+   Statuses aus der Datei auf den Zeitraum beschränkt.
 3. `GET /stopovers/{tripIds}?withIdentifiers=true` → Zwischenhalte, als Feld
    `trip.stopovers` am Status.
    Die Trip-ID steht schon als `checkin.trip` im Status, es sind also bis zu 50
@@ -259,6 +274,8 @@ filtert danach, die Linie zählt also unter dem neuen Operator.
 - Fehlende Datei = keine Änderung. Pfad: `--operator-line-patches`
   (Default `data/operator_line_patches.json`).
 
+### Baureihenfamilien
+
 Baureihenfamilien für den Kartenfilter stehen in
 `data/loc_class_families.txt` (JSON-Objekt
 Baureihe → Familie; dieselbe Baureihe darf mehrfach vorkommen und steht
@@ -266,7 +283,9 @@ dann in mehreren Familien). Schlüssel mit führendem `_` werden ignoriert,
 fehlende Datei = keine Familien. Die Datei wird erst beim Dashboard-Bau
 gelesen, nicht beim Export. Bearbeitbar im Tag-Editor unter
 **Fahrzeuge → Baureihenfamilien**. Die Endung `.txt` verhindert die
-Duplicate-Key-Warnung von Text-Editoren; der Loader liest alle Paare.
+Duplicate-Key-Warnung von Text-Editoren; der Loader liest alle Paare. Im
+Dropdown „Baureihe“ der Karte erscheint jede Familie zusätzlich; ihre Auswahl
+zeigt alle Mitglieds-Baureihen.
 
 ### Kanten-Patches (physische Via-Stationen)
 
@@ -298,12 +317,18 @@ kein Upload. Auswertung und Karte zählen danach die topologischen Teilstücke.
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen, damit Stats und Karte
   die Teilstücke zeigen.
 
-Im Tag-Editor listet die Sektion **Kanten** die Folge-Kanten der gewählten Fahrt
-(Standard / Fahrt / —). **Auf Karte anreichern** startet einen lokalen Server
+Im Tag-Editor listet die Gruppe *Fahrtverlauf* die Folge-Kanten der gewählten
+Fahrt mit ihrem Patch (`Standard (n Via)`, `Fahrt (n Via)`, `Fahrt: aus`
+oder `—`). **Auf Karte anreichern** startet einen lokalen Server
 (`http://127.0.0.1:8711/`) und öffnet Leaflet. Auf der Karte liegen Stationen
 im 20-km-Korridor um die Luftlinie; weitere Stationen (außerhalb) per Name oder
 ID suchen und übernehmen. Speichern als Standard oder nur diese Fahrt.
+**Patch entfernen ▾** löscht den Fahrt-Override oder den Standard der Kante.
 Internet nur für Kacheln.
+
+**Karte → Kanten** listet alle Standards und Fahrt-Overrides mit
+Stationsnamen und Via-Stationen. Von dort lassen sich Einträge löschen oder
+auf der Karte bearbeiten, ein Standard auch ohne vorher gewählte Fahrt.
 
 Stations-Rollen im Dashboard: **Ein-/Ausstieg** (Origin/Destination), **gehalten**
 (Träwelling-Zwischenhalt, sitzegeblieben), **physische Durchfahrt** (Via aus dem Patch).
@@ -371,8 +396,8 @@ unverändert.
   (Default `data/line_color_patches.json`).
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
 
-Im Tag-Editor zeigt **Linienfarbe** rechts zur gewählten Fahrt die aktuelle
-Farbe (HAFAS / lokal / keine). **Ändern** öffnet Hex-Eingabe und
+Im Tag-Editor zeigt **Linienfarbe** (Gruppe *Darstellung*) zur gewählten Fahrt
+die aktuelle Farbe (HAFAS / lokal / keine). **Ändern** öffnet Hex-Eingabe und
 Farbwähler; die Textfarbe wird aus dem Kontrast gesetzt. **Zurücksetzen**
 entfernt nur den lokalen Patch.
 
@@ -428,7 +453,7 @@ Der Schalter **Heimat** in der Sidebar filtert alle Ansichten (Übersicht,
 Statistiken, Karte, Linien, Fahrten, Fahrzeuge, Tagesziele) auf eine
 selbst gewählte Operator-Liste. Intern ist das nur `checkin.operator.name`
 (nach den [Operator-Ersetzungen](#ablauf-stufe-1)). Ein leerer Name steht in
-der Liste als `""` und im Editor als „(ohne Operator)“.
+der Liste als `""` und im Editor als „(ohne Betreiber)“.
 
 ```json
 {
@@ -494,7 +519,10 @@ benachbarten Zeilen mit Differenz ±1.
 Im Tag-Editor zeigt **Fahrzeuge → Fuhrpark** links die Baureihen aus den
 geladenen Fahrten plus schon gespeicherte Typen, rechts deren Nummern mit
 Status, Ausmusterungsdatum und Anzahl der Fahrten. Jede Änderung schreibt
-sofort die lokale Datei, nicht nach Träwelling.
+sofort die lokale Datei, nicht nach Träwelling. In den Details einer Fahrt
+(Gruppe *Fahrzeug*) steht neben der Nummer, ob sie im Fuhrpark steht
+(„✓ im Fuhrpark“, „⚠ nicht im Fuhrpark: …“, „ausgemustert: …“); so fallen
+Tippfehler beim Taggen auf.
 
 ### OAuth-Login
 
@@ -530,97 +558,81 @@ zusammengefügt. Sieben Ansichten:
 - **Übersicht** – Kennzahlen (Check-ins, km, Reisezeit, Punkte, Stationen/Linien,
   Zeitraum) und meistbefahrene Segmente.
 
-  ![Übersicht](docs/screenshots/01-uebersicht.png)
+- **Karte** – gerichtete Kanten entlang der tatsächlich befahrenen
+  Zwischenhalte. Filter nach Linie, Baureihe (inklusive der
+  [Baureihenfamilien](#baureihenfamilien)), Fahrzeug, Kategorie, Operator, Jahr
+  und Datumsbereich (Von/Bis); die Überschrift nennt die gesetzten Filter.
+  Das Dropdown **Darstellung** wählt den Modus:
+  - **Heatmap** (Standard): Dicke und Farbe zeigen die Anzahl der Fahrten über
+    ein Segment, der Pfeil die Richtung.
+  - **Fahrzeuge**: je Fahrzeug ein eigener Pfad in eigener Farbe. Die Pfade
+    sind gerichtet und im Rechtsverkehr versetzt, mit einer Lücke zwischen
+    beiden Richtungen; mehrere Fahrzeuge auf derselben Kante stapeln sich nach
+    außen. Kanten desselben Fahrzeugs werden über Zwischenstationen mit einer
+    Kurve verbunden, wo eine Fahrt tatsächlich von der einen Kante auf die
+    andere weiterfährt; die häufigste Folge setzt den Pfad fort, weitere
+    Folgen hängen als Abzweig an. Ein reiner Ein- oder Ausstieg bekommt keine
+    Kurve. Eine Durchbindung (`dubi=ende`, als nächster Check-in `dubi=start`
+    ab derselben Station) gilt als durchgehende Fahrt.
+  - **Linien**: dieselbe Darstellung je Linie. Farbe ist die Linienfarbe aus
+    den Check-ins (inklusive [Linienfarben-Patch](#linienfarben-patches));
+    Linien ohne Farbe bekommen den Farbkreis. Mit Fahrzeugfilter zählen nur
+    dessen Fahrten.
+  - **Baureihen**: dieselbe Darstellung je Baureihe, Farben aus dem Farbkreis.
+    Durchbindungen zählen hier auch bei Linienwechsel, solange die Baureihe
+    gleich bleibt.
 
-- **Karte** – Heatmap gerichteter Kanten entlang der tatsächlich befahrenen
-  Zwischenhalte; Filter nach Linie, Baureihe, Kategorie, Operator, Jahr und
-  Datumsbereich (Von/Bis). Die Überschrift nennt die gerade gesetzten Filter.
-  Gemappte Baureihenfamilien erscheinen zusätzlich im Dropdown „Baureihe“
-  (Auswahl der Familie zeigt alle Mitglieds-Baureihen).
-  Dicke und Farbe zeigen die Anzahl der Fahrten über ein Segment, der Pfeil die
-  Richtung. Das Dropdown **Darstellung** schaltet auf **Fahrzeuge**: je
-  Fahrzeug eine eigene Farbe. Der Farbkreis umfasst nur die Fahrzeuge des
-  aktuellen Filters und wird beim Filterwechsel neu vergeben. Die Farben
-  liegen in gleichen wahrgenommenen Abständen (OKLCH), nicht in gleichen
-  Farbwinkeln, sodass Grün und Blau nicht überwiegen und Gelb, Türkis und
-  Orange genauso oft vorkommen und Pink nicht überwiegt; jede Farbe ist so
-  kräftig, wie der Bildschirm-Farbraum es zulässt. Der Ring beginnt bei
-  sattem Gelb (#ffd500). Fahrzeuge, die auf der
-  Karte nah beieinanderliegen (gleiche Kante, auch in Gegenrichtung,
-  gemeinsame Station, gleiche Region), bekommen möglichst weit
-  auseinanderliegende Töne; weit entfernte Fahrzeuge dürfen ähnliche Farben
-  haben. Die Wagennummer legt die Farbe nicht fest. Die Linien bleiben gerichtet und im Rechtsverkehr
-  versetzt, mit einer sichtbaren Lücke zwischen den beiden Richtungen.
-  Mehrere Fahrzeuge auf derselben gerichteten Kante stapeln sich nach
-  außen, die Lücke bleibt frei. Im Stapel stehen nur Fahrzeuge, die der
-  aktuelle Filter noch zeigt. Nur in diesem Modus werden Kanten desselben Fahrzeugs über
-  Zwischenstationen mit einer Kurve verbunden, und zwar nur dort, wo eine
-  Fahrt unter dem aktuellen Filter tatsächlich von der einen Kante auf die
-  andere weiterfährt. Die häufigste Folge setzt den Pfad fort, jede
-  weitere gefahrene Folge an der Station wird als Abzweig ebenfalls mit einer
-  Kurve angebunden (als eigener Pfad). Ein reiner Ein- oder Ausstieg
-  bekommt keine Kurve. Eine Durchbindung (`dubi=ende`, als nächster Check-in
-  nach Check-in-Zeit `dubi=start` ab derselben Station) gilt als durchgehende
-  Fahrt: bei Fahrzeugen, die auf beiden getaggt sind, im Linienmodus bei
-  gleicher Linie, im Baureihenmodus bei gleicher Baureihe. **Linien** zeichnet genauso, nur je Linie statt je
-  Fahrzeug: Farbe ist die Linienfarbe aus den Check-ins (inklusive
-  Linienfarben-Patch), Linien ohne Farbe bekommen den Farbkreis, das Badge
-  zeigt den Liniennamen. **Baureihen** gruppiert ebenso nach Baureihe
-  (Farbkreis, Badge = Baureihe). Mit Fahrzeugfilter zählen nur dessen
-  Fahrten. In allen drei Modi gilt: Badges überlappen sich nie. Jeder
-  sichtbare Pfad bekommt ein Badge, auch auf einem kurzen Abschnitt, möglichst
-  in seiner Mitte. Liegt dort schon ein anderes, rückt es entlang des Pfads
-  auf die nächste freie Stelle; ohne freie Stelle entfällt es. Weitere
-  Badges (höchstens drei pro Fahrzeug bzw. Linie) gibt es nur auf Pfaden, die im
-  Ausschnitt lang genug sind: zwischen zwei Badges desselben Pfads liegt
-  mindestens die halbe kürzere Seite der Karte. Badges liegen ganz in der
-  Karte, mit Abstand zum Rand. Gehaltene Stationen ohne Ein-/Ausstieg erscheinen als weißer Kreis
-  mit schwarzem Rand, reine physische Durchfahrten als kleiner, gedämpfter Punkt.
-  Die Checkbox **Entdeckte Kanten** (Standard aus) legt in Grau
-  gerichtete Stopover-Paare darüber, die unter dem aktuellen Filter nicht
-  eingecheckt sind (z.B. auf dieser Linie nur im Laufweg gesehen, auf einer
-  anderen Linie aber befahren).   Die übrigen Kartenfilter gelten analog.
-  **Vollbild** (Schaltfläche oben links auf der Karte, unter dem Zoom) schaltet
-  nur die Karte selbst in den echten Vollbildmodus des Browsers. Filter und
-  Seitenleiste bleiben draußen. Esc oder dieselbe Schaltfläche beendet ihn.
-  Die Ansicht bleibt dabei erhalten.
+  Der Farbkreis umfasst nur die Gruppen des aktuellen Filters und wird beim
+  Filterwechsel neu vergeben. Die Farben liegen in gleichen wahrgenommenen
+  Abständen (OKLCH) und beginnen bei sattem Gelb (#ffd500); Gruppen, die auf
+  der Karte nah beieinanderliegen (gleiche Kante, gemeinsame Station, gleiche
+  Region), bekommen möglichst weit auseinanderliegende Töne. Jeder sichtbare
+  Pfad trägt ein Badge (Fahrzeugnummer, Linie bzw. Baureihe), möglichst in
+  seiner Mitte; Badges überlappen sich nie und liegen ganz in der Karte.
+  Lange Pfade bekommen bis zu drei Badges.
+
+  Stationen: Ein-/Ausstiege als Punkte, gefärbt nach Anzahl; gehaltene Stationen als weißer Kreis
+  mit schwarzem Rand, physische Durchfahrten als kleiner, gedämpfter Punkt.
+  Die Checkbox **Entdeckte Kanten** (Standard aus) legt in Grau gerichtete
+  Stopover-Paare darüber, die unter dem aktuellen Filter nicht eingecheckt
+  sind (z.B. auf dieser Linie nur im Laufweg gesehen). **Vollbild** (unter dem
+  Zoom) zeigt nur die Karte im Vollbildmodus des Browsers; Esc beendet ihn.
   Braucht Internet (Leaflet + Kacheln); der Rest läuft offline.
 
-  ![Karte](docs/screenshots/02-karte-berlin.jpg)
-
-- **Linien** – alle Linien gruppiert nach Operator; je Linie aggregierte gerichtete
-  Laufwege (Perlschnur) und die Anteile der Baureihen (nach Check-ins).
+- **Linien** – alle Linien gruppiert nach Operator; je Linie aggregierte
+  gerichtete Laufwege (Perlschnur) und die Anteile der Baureihen (nach
+  Check-ins). Suche und Datumsbereich (Von/Bis).
 
 - **Statistiken** – Rankings zu Linien, Baureihen, Fahrzeugen und Stationen
-  (Ein-/Ausstieg/gehalten/physische Durchfahrt, kombinierbare Filter), Kanten, Wiederholungen,
-  Kreuztabellen. Datumsbereich (Von/Bis) rechnet diese Tabellen für die
-  Check-ins in dem Zeitraum neu; ohne Von/Bis bleibt die voraggregierte
-  Gesamtstatistik.
-
-  ![Statistiken](docs/screenshots/04-statistiken.png)
+  (Ein-/Ausstieg/gehalten/physische Durchfahrt, kombinierbare Filter), Kanten
+  (häufigste, zuletzt befahren, älteste Erstbefahrung, vergessene
+  Einmal-Kanten), Wiederholungen (Fahrzeug, Linie, Baureihe × Kante) und
+  Kreuztabellen (Baureihe × Linie, Fahrzeug × Linie, Linie/Baureihe/Fahrzeug
+  × Monat, Linie × Verspätung). Die Unterpunkte stehen in der Seitenleiste.
+  Datumsbereich (Von/Bis) rechnet die Tabellen für die Check-ins in dem
+  Zeitraum neu; ohne Von/Bis bleibt die voraggregierte Gesamtstatistik.
 
 - **Fahrten** – durchsuch-/sortierbare Tabelle mit Datumsbereich (Von/Bis);
-  optionale Spalte „Laufweg“ (komprimierte Stationenkette der sichtbaren Fahrten);
-  Klick zeigt Stopovers mit Zeiten, Gleis und Verspätung.
+  optionale Spalten „Verspätung“ und „Laufweg“ (komprimierte Stationenkette),
+  Zeiten wahlweise nach Plan oder Ist. Klick zeigt die Stopovers mit Zeiten,
+  Gleis und Verspätung.
 
-  ![Fahrten](docs/screenshots/06-fahrten.png)
-
-- **Fahrzeuge** – Matrix getaggter Wagennummern (`trwl:vehicle_number`) je Linie,
-  gruppiert nach Baureihe/Kategorie. Linienspalten nach Name oder nach Anzahl
-  Fahrten in der Tabelle. Mit Fuhrpark je Baureihe jede definierte
-  Nummer, die Abdeckung und ausgemusterte Wagen schwarz (Goldrand läuft durch).
-
-  ![Fahrzeuge](docs/screenshots/05-fahrzeuge.png)
+- **Fahrzeuge** – Matrix getaggter Wagennummern (`trwl:vehicle_number`) je
+  Linie, Tabellen je Baureihe oder je Produktkategorie. Filter nach Operator,
+  Kategorie, Datumsbereich und Suche; Linienspalten nach Name oder Anzahl
+  Fahrten. Die Zellen zeigen wahlweise Datum, Häufigkeit, km und Segmente;
+  Klick auf eine Zelle listet alle Fahrten dieses Wagens auf der Linie. Mit
+  [Fuhrpark](#fuhrpark) erscheint je Baureihe jede definierte Nummer samt
+  Abdeckung, ausgemusterte Wagen schwarz; **Nicht benutzte ausblenden** blendet
+  ungefahrene Nummern aus.
 
 - **Tagesziele** – Erstvorkommen und Wiederholungen an einem gewählten Tag
-  (Linien, Fahrzeuge, Top-Wagen der Baureihe, Kanten, benutzte vs. gehaltene vs.
-  physisch durchfahrene Stationen und Kombis).
+  (Linien, Fahrzeuge, Top-Wagen der Baureihe, Kanten, benutzte vs. gehaltene
+  vs. physisch durchfahrene Stationen und Kombis). ‹ und › springen zum
+  vorigen bzw. nächsten Tag mit Fahrten.
 
-  ![Tagesziele](docs/screenshots/07-tagesziele.png)
-
-Alle Screenshots stammen aus dem [Demo-Datensatz](#demo) (`walita.py --demo`) –
-weitere Ansichten liegen unter [`docs/screenshots/`](docs/screenshots), darunter
-die Karte im Dunkelmodus und deutschlandweit herausgezoomt.
+Linien, Fahrten, Fahrzeuge und Tagesziele haben **Als TSV kopieren** für die
+gerade sichtbare Tabelle (zum Einfügen in eine Tabellenkalkulation).
 
 Wagennummern: Trennung immer an `,` / `;`; standardmäßig auch an `+`
 (`463001+463501` → zwei Fahrzeuge). Mit `--ignore-plus` bleibt Doppeltraktion
@@ -730,6 +742,10 @@ python3 build_dashboard.py --open
 
 ## Hinweise
 
+- **Ältere Fahrten geändert:** der Export lädt bei vorhandener
+  `statuses.json` nur neue Statuses und die letzten 2 Tage. Wer eine ältere
+  Fahrt auf Träwelling ändert, löscht oder nachträglich eincheckt, braucht
+  einmal `walita.py --full`.
 - **Fehlende Zwischenhalte:** kennt die API eine Trip-ID nicht, bekommt der Status
   `trip: null` + `trip_error`; Start und Ziel bleiben im `checkin` erhalten und die
   Fahrt zählt weiter mit, nur ohne Zwischenhalte.

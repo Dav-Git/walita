@@ -30,7 +30,7 @@ def check_config_file(path, pairs=False):
     if not path or not os.path.isfile(path):
         return None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             if pairs:
                 data = json.load(f, object_pairs_hook=list)
                 ok = isinstance(data, list)
@@ -68,6 +68,13 @@ def line_rule_matches(rules, statuses):
         sum(1 for s in statuses if _line(s) == line and _operator(s) == operator)
         for line, operator, _name in rules
     ]
+
+
+def sort_value(value):
+    """Sortierschlüssel: Zahlen numerisch vor Text, Text ohne Groß/klein."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (0, value, "")
+    return (1, 0, str(value).casefold())
 
 
 class SettingsContext:
@@ -141,6 +148,12 @@ class TablePage(ttk.Frame):
     def _count(self, iids):
         return len(iids)
 
+    def _ordered(self, items, values_of):
+        """Einträge einer Gruppe nach der gewählten Spalte sortieren."""
+        col, desc = self._sort
+        idx = self.columns.index(col) if col in self.columns else 0
+        return sorted(items, key=lambda it: sort_value(values_of(it)[idx]), reverse=desc)
+
     # Hooks
     def load(self):
         raise NotImplementedError
@@ -193,7 +206,7 @@ class TablePage(ttk.Frame):
         idx = self.columns.index(col)
         rows = [r for r in self.rows()
                 if not q or q in " ".join(str(v) for v in r[1]).casefold()]
-        rows.sort(key=lambda r: str(r[1][idx]).casefold(), reverse=desc)
+        rows.sort(key=lambda r: sort_value(r[1][idx]), reverse=desc)
         for iid, values, tags in rows:
             tags = tuple(tags) + (("orphan",) if iid in orphan else ())
             self.tree.insert("", "end", iid=iid, values=values, tags=tags)
@@ -859,10 +872,15 @@ class FamiliesPage(MasterDetailPage):
         if not family:
             return
         dlg = FieldsDialog(self, "Baureihe zuordnen", [
-            ("Baureihe", "", vr.collect_loc_classes(self.ctx.statuses)),
+            ("Baureihe", "", self.member_choices()),
         ])
         if dlg.result:
             self.assign(family, dlg.result[0])
+
+    def member_choices(self):
+        """Baureihen aus Fahrten und Fuhrpark für die Zuordnung."""
+        roster = vr.load_roster(self.ctx.paths["roster"]).get("types") or {}
+        return vr.collect_loc_classes(self.ctx.statuses, roster.keys())
 
     def _remove(self, family, members):
         pairs = [p for p in self.doc["pairs"]
@@ -1029,12 +1047,18 @@ def status_label(status):
     )
 
 
-def find_status_with_edge(statuses, a, b):
+def find_status_with_edge(statuses, a, b, patches=None):
+    """Eine Fahrt über a → b; bevorzugt eine ohne eigenen Override auf der Kante."""
+    overrides = (patches or {}).get("overrides") or {}
+    fallback = None
     for s in statuses:
         for x, y in ep.consecutive_pairs(dl.traveled_stopovers(s)):
             if x.get("id") == a and y.get("id") == b:
-                return s
-    return None
+                if (s.get("id"), a, b) not in overrides:
+                    return s
+                fallback = fallback or s
+                break
+    return fallback
 
 
 def move_distance_m(stations, sid, lat, lon):
@@ -1123,7 +1147,9 @@ class ColorsPage(TablePage):
         ):
             gid = "g:%s|%s" % (line, op)
             self.tree.insert("", "end", iid=gid, text=f"{line} · {op}", open=True)
-            for sid, label, bg, fg in sorted(items, key=lambda x: x[1]):
+            for sid, label, bg, fg in self._ordered(
+                items, lambda x: (x[1], "#" + x[2], "#" + x[3])
+            ):
                 tag = "c%s%s" % (bg, fg)
                 self.tree.tag_configure(tag, background="#" + bg, foreground="#" + fg)
                 iid = "s:%d" % sid
@@ -1292,7 +1318,8 @@ class EdgesPage(_GroupedPage):
             if _station(self.stations, a) is None or _station(self.stations, b) is None:
                 bad.add("d:%d:%d" % (a, b))
         for (sid, a, b) in self.patches["overrides"]:
-            if sid not in known_ids:
+            unknown = _station(self.stations, a) is None or _station(self.stations, b) is None
+            if sid not in known_ids or unknown:
                 bad.add("o:%d:%d:%d" % (sid, a, b))
         return bad
 
@@ -1310,8 +1337,9 @@ class EdgesPage(_GroupedPage):
             )
 
         self.tree.insert("", "end", iid="g:d", text="Standards", open=True)
-        for (a, b), via in sorted(
-            self.patches["defaults"].items(), key=lambda kv: edge(*kv[0]).casefold()
+        for (a, b), via in self._ordered(
+            self.patches["defaults"].items(),
+            lambda kv: (edge(*kv[0]), self._via_text(kv[1]), ""),
         ):
             vals = (edge(a, b), self._via_text(via), "")
             if q and q not in " ".join(vals).casefold():
@@ -1320,7 +1348,13 @@ class EdgesPage(_GroupedPage):
             self.tree.insert("g:d", "end", iid=iid, values=vals,
                              tags=("orphan",) if iid in orphan else ())
         self.tree.insert("", "end", iid="g:o", text="Fahrt-Overrides", open=True)
-        for (sid, a, b), via in sorted(self.patches["overrides"].items()):
+        def ov_values(kv):
+            (sid, a, b), via = kv
+            st = by_id.get(sid)
+            return (edge(a, b), self._via_text(via),
+                    status_label(st) if st else f"Fahrt {sid} (unbekannt)")
+
+        for (sid, a, b), via in self._ordered(self.patches["overrides"].items(), ov_values):
             st = by_id.get(sid)
             vals = (edge(a, b), self._via_text(via),
                     status_label(st) if st else f"Fahrt {sid} (unbekannt)")
@@ -1402,7 +1436,12 @@ class StationsPage(_GroupedPage):
         q = (self.search_var.get() or "").strip().casefold()
         orphan = self.orphans()
         self.tree.insert("", "end", iid="h:m", text="Verschiebungen", open=True)
-        for sid, (lat, lon) in sorted(self.patches["moves"].items()):
+        def move_values(kv):
+            sid, (lat, lon) = kv
+            dist = move_distance_m(self.stations, sid, lat, lon)
+            return (station_label(self.stations, sid), dist if dist is not None else -1)
+
+        for sid, (lat, lon) in self._ordered(self.patches["moves"].items(), move_values):
             dist = move_distance_m(self.stations, sid, lat, lon)
             vals = (station_label(self.stations, sid),
                     f"um {dist} m verschoben" if dist is not None else "verschoben")
@@ -1412,7 +1451,11 @@ class StationsPage(_GroupedPage):
             self.tree.insert("h:m", "end", iid=iid, values=vals,
                              tags=("orphan",) if iid in orphan else ())
         self.tree.insert("", "end", iid="h:j", text="Zusammenlegungen", open=True)
-        for src, dest in sorted(self.patches["merges"].items()):
+        for src, dest in self._ordered(
+            self.patches["merges"].items(),
+            lambda kv: (station_label(self.stations, kv[0]),
+                        station_label(self.stations, kv[1])),
+        ):
             vals = (station_label(self.stations, src),
                     "→ " + station_label(self.stations, dest))
             if q and q not in " ".join(vals).casefold():

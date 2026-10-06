@@ -669,7 +669,7 @@ def load_operator_replacements(path):
     if not path or not os.path.isfile(path):
         return {}
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(f"Operator-Ersetzungen {path} nicht lesbar: {e}") from e

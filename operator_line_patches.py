@@ -4,7 +4,7 @@
 """Lokale Operator-Patches je Linie.
 
 Sonderfälle, in denen eine Linie unter dem falschen Operator steht. Die
-Regeln liegen in `operator_line_patches.json`, der Editor bearbeitet sie auf
+Regeln liegen in `data/operator_line_patches.json`, der Editor bearbeitet sie auf
 der Seite „Betreiber je Linie“. Sie gelten beim Dashboard-Bau nur auf Kopien;
 `statuses.json` bleibt unverändert.
 """

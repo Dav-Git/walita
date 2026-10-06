@@ -2327,9 +2327,9 @@ def main(argv=None):
         help="Wagennummern-Tags nicht am '+' trennen (Doppeltraktion bleibt ein Fahrzeug).",
     )
     parser.add_argument(
-        "--loc-class-families", default="loc_class_families.txt",
+        "--loc-class-families", default="data/loc_class_families.txt",
         help="Baureihe→Familie für den Kartenfilter "
-             "(Default: loc_class_families.txt; JSON-Objekt, "
+             "(Default: data/loc_class_families.txt; JSON-Objekt, "
              "gleiche Baureihe darf mehrfach vorkommen).",
     )
     parser.add_argument(
@@ -2363,9 +2363,9 @@ def main(argv=None):
              "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
     )
     parser.add_argument(
-        "--operator-line-patches", default="operator_line_patches.json",
+        "--operator-line-patches", default="data/operator_line_patches.json",
         help="Operator einer Linie überschreiben "
-             "(Default: operator_line_patches.json; fehlende Datei = keine Änderung).",
+             "(Default: data/operator_line_patches.json; fehlende Datei = keine Änderung).",
     )
     args = parser.parse_args(argv)
 

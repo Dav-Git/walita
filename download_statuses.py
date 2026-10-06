@@ -803,9 +803,9 @@ def main(argv=None):
         help="Vorhandenen Trip-Cache nicht nutzen, alle Trips neu von der API laden.",
     )
     parser.add_argument(
-        "--operator-replacements", default="operator_replacements.json",
+        "--operator-replacements", default="data/operator_replacements.json",
         help="JSON-Datei mit Operator-Namen-Ersetzungen (alt -> neu). "
-             "Default: operator_replacements.json im Projektverzeichnis. "
+             "Default: data/operator_replacements.json. "
              "Fehlt die Datei, wird nichts ersetzt.",
     )
     args = parser.parse_args(argv)

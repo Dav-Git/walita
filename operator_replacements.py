@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 besuka97
-"""Betreibernamen vereinheitlichen: `operator_replacements.json`.
+"""Betreibernamen vereinheitlichen: `data/operator_replacements.json`.
 
 Ein JSON-Objekt Rohname → kanonischer Name. `download_statuses.py` wendet es
 beim Export auf `checkin.operator.name` an. Schlüssel mit führendem `_` sind

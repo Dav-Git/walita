@@ -101,8 +101,8 @@ def main(argv=None):
         help="Keine stations.json schreiben.",
     )
     export.add_argument(
-        "--operator-replacements", default="operator_replacements.json",
-        help="JSON mit Operator-Namen-Ersetzungen (Default: operator_replacements.json).",
+        "--operator-replacements", default="data/operator_replacements.json",
+        help="JSON mit Operator-Namen-Ersetzungen (Default: data/operator_replacements.json).",
     )
 
     dash = parser.add_argument_group("Dashboard")
@@ -119,9 +119,9 @@ def main(argv=None):
         help="Wagennummern-Tags nicht am '+' trennen.",
     )
     dash.add_argument(
-        "--loc-class-families", default="loc_class_families.txt",
+        "--loc-class-families", default="data/loc_class_families.txt",
         help="Baureihe→Familie für den Kartenfilter "
-             "(Default: loc_class_families.txt; JSON-Objekt, "
+             "(Default: data/loc_class_families.txt; JSON-Objekt, "
              "gleiche Baureihe darf mehrfach vorkommen).",
     )
     dash.add_argument(
@@ -155,9 +155,9 @@ def main(argv=None):
              "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
     )
     dash.add_argument(
-        "--operator-line-patches", default="operator_line_patches.json",
+        "--operator-line-patches", default="data/operator_line_patches.json",
         help="Operator einer Linie überschreiben "
-             "(Default: operator_line_patches.json; fehlende Datei = keine Änderung).",
+             "(Default: data/operator_line_patches.json; fehlende Datei = keine Änderung).",
     )
 
     mode = parser.add_argument_group("Modus")

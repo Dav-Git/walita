@@ -1006,15 +1006,15 @@ class Section(ttk.Frame):
 class EditorApp:
     def __init__(self, root, token, username, statuses, statuses_path, limit, since,
                  stations_path="data/stations.json", dashboard_path="data/dashboard.html",
-                 loc_class_families="loc_class_families.txt", ignore_plus=False,
+                 loc_class_families="data/loc_class_families.txt", ignore_plus=False,
                  edge_patches_path="data/edge_patches.json",
                  station_patches_path="data/station_patches.json",
                  line_color_patches_path="data/line_color_patches.json",
                  home_region_path="data/home_region.json",
                  boarding_patches_path="data/boarding_patches.json",
                  vehicle_roster_path="data/vehicle_roster.json",
-                 operator_line_patches_path="operator_line_patches.json",
-                 operator_replacements_path="operator_replacements.json",
+                 operator_line_patches_path="data/operator_line_patches.json",
+                 operator_replacements_path="data/operator_replacements.json",
                  ui_state_path="data/editor_state.json"):
         self.root = root
         self.token = token
@@ -2954,8 +2954,8 @@ def parse_args(argv=None):
         help="Zieldatei fürs Dashboard (Default: data/dashboard.html).",
     )
     parser.add_argument(
-        "--loc-class-families", default="loc_class_families.txt",
-        help="Baureihe→Familie fürs Dashboard (Default: loc_class_families.txt).",
+        "--loc-class-families", default="data/loc_class_families.txt",
+        help="Baureihe→Familie fürs Dashboard (Default: data/loc_class_families.txt).",
     )
     parser.add_argument(
         "--ignore-plus", action="store_true",
@@ -2986,12 +2986,12 @@ def parse_args(argv=None):
         help="Lokaler Fuhrpark je Baureihe (Default: data/vehicle_roster.json).",
     )
     parser.add_argument(
-        "--operator-line-patches", default="operator_line_patches.json",
-        help="Operator einer Linie überschreiben (Default: operator_line_patches.json).",
+        "--operator-line-patches", default="data/operator_line_patches.json",
+        help="Operator einer Linie überschreiben (Default: data/operator_line_patches.json).",
     )
     parser.add_argument(
-        "--operator-replacements", default="operator_replacements.json",
-        help="Betreibernamen Rohname → kanonisch (Default: operator_replacements.json).",
+        "--operator-replacements", default="data/operator_replacements.json",
+        help="Betreibernamen Rohname → kanonisch (Default: data/operator_replacements.json).",
     )
     parser.add_argument(
         "--limit", type=int, default=None,

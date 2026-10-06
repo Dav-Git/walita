@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 besuka97
-"""Baureihenfamilien: `loc_class_families.txt`.
+"""Baureihenfamilien: `data/loc_class_families.txt`.
 
 JSON-Objekt-Syntax, in der dieselbe Baureihe mehrfach als Schlüssel stehen
 darf (eine Baureihe in mehreren Familien). Gelesen als Paarliste, geschrieben

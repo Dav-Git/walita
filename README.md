@@ -67,9 +67,6 @@ python3 walita.py --demo    # ohne Token ausprobieren
 │   ├── station_patch.html # Leaflet-Karte: Koordinaten verschieben / mergen
 │   └── js/
 ├── version.py             # Version + User-Agent
-├── operator_replacements.json  # manuelle Operator-Namen-Ersetzungen
-├── operator_line_patches.json  # Operator einer Linie (Sonderfälle)
-├── loc_class_families.txt      # Baureihe → Familie (Kartenfilter)
 ├── examples/              # Demo-Dataset (eingecheckt, siehe Demo)
 │   ├── statuses.json
 │   └── stations.json
@@ -80,7 +77,8 @@ python3 walita.py --demo    # ohne Token ausprobieren
 
 > **Hinweis:** Eigene Reisedaten unter `data/` (`statuses.json`, `stations.json`,
 > `trips.json`, `dashboard.html`, `oauth_token.json`, `edge_patches.json`,
-> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`, `vehicle_roster.json`, `editor_state.json`) sind persönlich und
+> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`, `vehicle_roster.json`, `editor_state.json`,
+> `operator_replacements.json`, `operator_line_patches.json`, `loc_class_families.txt`) sind persönlich und
 > gitignored. Zum Ausprobieren ohne Token: [Demo](#demo).
 
 ## Voraussetzungen
@@ -154,7 +152,7 @@ neu eingeloggt.
 | `--refresh-trips` | `trips.json`-Cache ignorieren, alle Trips neu von der API |
 | `--refresh-stations` | `stations.json`-Cache ignorieren, Koordinaten und Identifier neu auflösen |
 | `--no-stations` | Keine `stations.json` schreiben (Karte ohne Koordinaten) |
-| `--operator-replacements PFAD` | JSON mit Operator-Namen-Ersetzungen (Default `operator_replacements.json`) |
+| `--operator-replacements PFAD` | JSON mit Operator-Namen-Ersetzungen (Default `data/operator_replacements.json`) |
 
 ### Dashboard
 
@@ -163,7 +161,7 @@ neu eingeloggt.
 | `--open` | Dashboard im Browser öffnen (**Default**) |
 | `--no-open` | Nicht im Browser öffnen |
 | `--ignore-plus` | Wagennummern-Tags nicht am `+` trennen (Doppeltraktion = ein Fahrzeug) |
-| `--loc-class-families PFAD` | Baureihe→Familie für den Kartenfilter (Default `loc_class_families.txt`; JSON-Objekt, gleiche Baureihe darf mehrfach vorkommen) |
+| `--loc-class-families PFAD` | Baureihe→Familie für den Kartenfilter (Default `data/loc_class_families.txt`; JSON-Objekt, gleiche Baureihe darf mehrfach vorkommen) |
 
 ### Modi
 
@@ -230,7 +228,7 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
    vorhandener Cache ohne Identifier wird einmalig nachgezogen;
    `--refresh-stations` holt alles neu.
 5. Vor dem Schreiben von `statuses.json` werden Operator-Namen anhand von
-   [`operator_replacements.json`](operator_replacements.json) vereinheitlicht
+   `data/operator_replacements.json` vereinheitlicht
    (`checkin.operator.name`: Rohname → kanonischer Name). Bearbeitbar im
    Tag-Editor unter **Betreiber → Namen**; Schlüssel mit führendem `_`
    (Kommentare) werden ignoriert.
@@ -239,7 +237,7 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 ### Operator je Linie
 
 Steht eine Linie unter dem falschen Operator, setzt
-[`operator_line_patches.json`](operator_line_patches.json) den Namen beim
+`data/operator_line_patches.json` den Namen beim
 Dashboard-Bau auf einer Kopie um. `statuses.json` bleibt unverändert.
 Bearbeitbar im Tag-Editor unter **Betreiber → Je Linie**. Die Heimatregion
 filtert danach, die Linie zählt also unter dem neuen Operator.
@@ -259,10 +257,10 @@ filtert danach, die Linie zählt also unter dem neuen Operator.
 - `line` ist `checkin.lineName`, `operator` der Name nach den
   Operator-Ersetzungen. Die erste passende Regel gilt.
 - Fehlende Datei = keine Änderung. Pfad: `--operator-line-patches`
-  (Default `operator_line_patches.json`).
+  (Default `data/operator_line_patches.json`).
 
 Baureihenfamilien für den Kartenfilter stehen in
-[`loc_class_families.txt`](loc_class_families.txt) (JSON-Objekt
+`data/loc_class_families.txt` (JSON-Objekt
 Baureihe → Familie; dieselbe Baureihe darf mehrfach vorkommen und steht
 dann in mehreren Familien). Schlüssel mit führendem `_` werden ignoriert,
 fehlende Datei = keine Familien. Die Datei wird erst beim Dashboard-Bau
@@ -640,7 +638,7 @@ python3 build_dashboard.py --line-color-patches data/line_color_patches.json --o
 python3 build_dashboard.py --boarding-patches data/boarding_patches.json --open
 python3 build_dashboard.py --home-region data/home_region.json --open
 python3 build_dashboard.py --vehicle-roster data/vehicle_roster.json --open
-python3 build_dashboard.py --operator-line-patches operator_line_patches.json --open
+python3 build_dashboard.py --operator-line-patches data/operator_line_patches.json --open
 ```
 
 ## Tag-Editor
@@ -685,10 +683,10 @@ sind grau, **Verwaiste entfernen** löscht sie.
 | Seite | Datei | wirkt |
 | --- | --- | --- |
 | Fahrzeuge → Fuhrpark | `data/vehicle_roster.json` | beim Dashboard-Bau |
-| Fahrzeuge → Baureihenfamilien | `loc_class_families.txt` | beim Dashboard-Bau |
+| Fahrzeuge → Baureihenfamilien | `data/loc_class_families.txt` | beim Dashboard-Bau |
 | Betreiber → Heimatregion | `data/home_region.json` | beim Dashboard-Bau |
-| Betreiber → Namen | `operator_replacements.json` | **beim nächsten Export** |
-| Betreiber → Je Linie | `operator_line_patches.json` | beim Dashboard-Bau |
+| Betreiber → Namen | `data/operator_replacements.json` | **beim nächsten Export** |
+| Betreiber → Je Linie | `data/operator_line_patches.json` | beim Dashboard-Bau |
 | Karte → Kanten | `data/edge_patches.json` | beim Dashboard-Bau |
 | Karte → Stationen | `data/station_patches.json` | beim Dashboard-Bau |
 | Darstellung → Linienfarben | `data/line_color_patches.json` | beim Dashboard-Bau |

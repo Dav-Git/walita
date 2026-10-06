@@ -19,6 +19,12 @@ Beispiel:
     python3 download_statuses.py --login         # OAuth-Login im Browser (statt TRWL_TOKEN)
     python3 download_statuses.py --limit 3       # kleiner Testlauf
     python3 download_statuses.py --skip-trips    # nur Liste, ohne Zwischenhalte
+    python3 download_statuses.py --full          # alle Statuses laden
+
+Liegt statuses.json schon vor, werden nur neue Statuses und die letzten
+INCREMENTAL_OVERLAP_DAYS Tage davor neu geladen (siehe `incremental_cutoff`);
+ältere bleiben aus der Datei. Änderungen an älteren Fahrten und nachträgliche
+Check-ins kommen mit --full an.
 """
 
 import argparse
@@ -41,6 +47,9 @@ TRIP_REQUEST_DELAY = 0.15
 # Mehr IDs wertet /stopovers pro Anfrage nicht aus; überzählige fallen still weg.
 STOPOVER_BATCH = 50
 MAX_RETRIES = 4
+# Inkrementeller Abruf: so viele Tage vor dem neuesten bekannten Status werden
+# erneut geladen, damit Korrekturen an jüngeren Fahrten ankommen.
+INCREMENTAL_OVERLAP_DAYS = 2
 # Station-Identifier (IBNR, DHID/IFOPT, MOTIS, …) an Stopovers und GET /station/{id}.
 WITH_IDENTIFIERS = {"withIdentifiers": "true"}
 
@@ -156,12 +165,86 @@ def status_date(status):
     return ts[:10] if isinstance(ts, str) and len(ts) >= 10 else None
 
 
-def iter_statuses(username, token, limit=None, since=None):
+def status_sort_time(status):
+    """Zeitpunkt, nach dem `/user/{username}/statuses` absteigend sortiert.
+
+    Das ist die geplante Abfahrt am Einstieg; Fallback auf `departure` bzw.
+    `createdAt`. Gibt ein zeitzonenbehaftetes datetime oder None zurück.
+    """
+    checkin = status.get("checkin") or {}
+    origin = checkin.get("origin") or {}
+    for ts in (origin.get("departurePlanned"), origin.get("departure"),
+               status.get("createdAt")):
+        if not isinstance(ts, str):
+            continue
+        try:
+            dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    return None
+
+
+def incremental_cutoff(statuses, now=None):
+    """Grenze für den inkrementellen Abruf, oder None (dann alles laden).
+
+    Neuester bekannter Status, der nicht in der Zukunft liegt, minus
+    INCREMENTAL_OVERLAP_DAYS. Zukünftige Check-ins zählen nicht: sie stehen
+    vorn in der Liste und liegen hinter allen neuen vergangenen Fahrten.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    past = [t for t in map(status_sort_time, statuses) if t is not None and t <= now]
+    if not past:
+        return None
+    return max(past) - datetime.timedelta(days=INCREMENTAL_OVERLAP_DAYS)
+
+
+def merge_incremental(fetched, existing):
+    """Neu geladene Statuses plus die älteren aus der vorhandenen Datei.
+
+    Die API liefert absteigend sortiert; alles ab dem ältesten neu geladenen
+    Status gilt als frisch. Was dort in der Datei steht, aber in der Antwort
+    fehlt, gilt als gelöscht und fällt weg. Ältere Statuses bleiben
+    unverändert (inklusive lokal zusammengeführter Tags und Texte).
+    """
+    ids = {s.get("id") for s in fetched}
+    times = [t for t in map(status_sort_time, fetched) if t is not None]
+    boundary = min(times) if times else None
+    kept = []
+    for status in existing:
+        if status.get("id") in ids:
+            continue
+        t = status_sort_time(status)
+        if boundary is None or t is None or t <= boundary:
+            kept.append(status)
+    return list(fetched) + kept
+
+
+def load_existing_statuses(path):
+    """Liest eine vorhandene statuses.json; None, wenn sie fehlt oder unlesbar ist."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            statuses = json.load(f)
+    except (OSError, ValueError) as e:
+        log(f"Vorhandene {path} nicht lesbar ({e}), lade alle Statuses.")
+        return None
+    return statuses if isinstance(statuses, list) else None
+
+
+def iter_statuses(username, token, limit=None, since=None, stop_before=None):
     """Iteriert über alle Statuses des Nutzers, folgt der Cursor-Pagination.
 
     `since` (String 'YYYY-MM-DD') filtert auf Statuses, deren Abfahrtsdatum
     *strikt nach* diesem Tag liegt (siehe `status_date`). Statuses ohne
     ermittelbares Datum werden dann übersprungen.
+
+    `stop_before` (datetime) beendet das Blättern nach der ersten Seite, deren
+    ältester Status (`status_sort_time`) davor liegt; die Seite selbst wird
+    noch vollständig geliefert.
     """
     count = 0
     skipped = 0
@@ -182,6 +265,12 @@ def iter_statuses(username, token, limit=None, since=None):
             count += 1
             if limit and count >= limit:
                 return
+        if stop_before is not None and rows:
+            times = [t for t in map(status_sort_time, rows) if t is not None]
+            if times and min(times) < stop_before:
+                log(f"Bekannter Bereich erreicht (vor {stop_before:%Y-%m-%d %H:%M} UTC), "
+                    "höre auf zu blättern.")
+                break
         next_url = payload.get("links", {}).get("next")
         if next_url:
             next_url = url_with_query(next_url, WITH_IDENTIFIERS)
@@ -368,7 +457,7 @@ def save_trip_cache(path, cache):
     for tid, (stopovers, _err) in cache.items():
         if not stopovers:
             continue
-        raw[str(tid)] = stopovers
+        raw[str(tid)] = [_without_identifiers(st) for st in stopovers]
     tmp = path + ".tmp"
     try:
         ensure_parent_dir(path)
@@ -517,7 +606,7 @@ def resolve_stations(statuses, token, cache=None):
             }
         except ApiError as e:
             log(f"  Station {sid} nicht auflösbar: {e}")
-            # 404: Station gibt es nicht mehr – leere Liste merken, nicht jedes Mal neu fragen.
+            # 404: Station unbekannt – leere Liste merken, nicht jedes Mal neu fragen.
             # Andere Fehler (429, 5xx): Schlüssel weglassen, nächster Lauf versucht es erneut.
             if e.code == 404:
                 stations[sid] = {
@@ -533,62 +622,35 @@ def resolve_stations(statuses, token, cache=None):
     return stations
 
 
-def _station_entry(stations, sid):
-    """Lookup in der Stations-Map; JSON-IDs können int oder str sein."""
-    if sid is None:
-        return None
-    entry = stations.get(sid)
-    if entry is not None:
-        return entry
-    try:
-        return stations.get(int(sid))
-    except (TypeError, ValueError):
-        return None
+def _without_identifiers(st):
+    """Kopie eines Stopovers ohne `identifiers` (auch im verschachtelten station-Objekt).
 
-
-def _apply_identifiers_to_stopover(st, stations):
-    """Schreibt die Identifier-Liste auf Stopover und verschachteltes station-Objekt."""
-    if not isinstance(st, dict):
-        return
-    station = st.get("station") if isinstance(st.get("station"), dict) else None
-    sid = (station or {}).get("id")
-    if sid is None:
-        sid = st.get("id")
-    entry = _station_entry(stations, sid)
-    if not entry:
-        return
-    idents = entry.get("identifiers")
-    if not isinstance(idents, list):
-        return
-    st["identifiers"] = idents
-    if station is not None:
-        station["identifiers"] = idents
-
-
-def apply_identifiers_to_statuses(statuses, stations):
-    """Kopiert Identifier aus der Stations-Map in Check-in- und Trip-Stopovers.
-
-    Die Status-Liste und `/stopovers` liefern Identifier nicht mit. Sie kommen
-    von `GET /station/{id}?withIdentifiers=true` und werden hier auf Origin,
-    Destination und Zwischenhalte geschrieben, damit statuses.json denselben
-    Stand hat wie stations.json.
+    Identifier stehen pro Station nur in stations.json. Stopovers ohne
+    Identifier kommen als dasselbe Objekt zurück.
     """
+    if not isinstance(st, dict):
+        return st
+    station = st.get("station")
+    has_nested = isinstance(station, dict) and "identifiers" in station
+    if "identifiers" not in st and not has_nested:
+        return st
+    out = {k: v for k, v in st.items() if k != "identifiers"}
+    if has_nested:
+        out["station"] = {k: v for k, v in station.items() if k != "identifiers"}
+    return out
+
+
+def strip_identifiers_from_statuses(statuses):
+    """Entfernt Identifier aus Origin, Destination und Trip-Stopovers (in place)."""
     for status in statuses:
-        checkin = status.get("checkin") or {}
-        _apply_identifiers_to_stopover(checkin.get("origin"), stations)
-        _apply_identifiers_to_stopover(checkin.get("destination"), stations)
-        trip = status.get("trip") or {}
-        for st in trip.get("stopovers") or []:
-            _apply_identifiers_to_stopover(st, stations)
-
-
-def apply_identifiers_to_trip_cache(cache, stations):
-    """Schreibt Identifier in alle Stopovers des Trip-Caches (trips.json)."""
-    for stopovers, err in cache.values():
-        if err or not isinstance(stopovers, list):
-            continue
-        for st in stopovers:
-            _apply_identifiers_to_stopover(st, stations)
+        checkin = status.get("checkin")
+        if isinstance(checkin, dict):
+            for key in ("origin", "destination"):
+                if key in checkin:
+                    checkin[key] = _without_identifiers(checkin[key])
+        trip = status.get("trip")
+        if isinstance(trip, dict) and isinstance(trip.get("stopovers"), list):
+            trip["stopovers"] = [_without_identifiers(st) for st in trip["stopovers"]]
 
 
 def ensure_parent_dir(path):
@@ -708,6 +770,12 @@ def main(argv=None):
         "--limit", type=int, default=None, help="Max. Anzahl Statuses (zum Testen)."
     )
     parser.add_argument(
+        "--full", action="store_true",
+        help="Alle Statuses laden. Ohne das Flag lädt der Export bei vorhandener "
+             f"Ausgabedatei nur neue und die letzten {INCREMENTAL_OVERLAP_DAYS} Tage "
+             "davor; für Änderungen an älteren Fahrten und nachträgliche Check-ins.",
+    )
+    parser.add_argument(
         "--since", metavar="YYYY-MM-DD", default="",
         help="Nur Statuses mit Abfahrtsdatum strikt nach diesem Tag herunterladen. "
              "Default: leer, also alle Statuses. "
@@ -790,14 +858,36 @@ def main(argv=None):
         return 1
     log(f"Angemeldet als: {username}")
 
+    existing = None
+    if args.full:
+        log("--full: lade alle Statuses.")
+    elif args.limit:
+        log("--limit: lade ohne Abgleich mit vorhandener Datei.")
+    else:
+        existing = load_existing_statuses(args.output)
+    cutoff = incremental_cutoff(existing) if existing else None
+    if existing is not None and cutoff is None:
+        log(f"{args.output} enthält keine vergangene Fahrt, lade alle Statuses.")
+    elif cutoff is not None:
+        log(f"Inkrementell: {len(existing)} Statuses aus {args.output}, lade neue "
+            f"und ab {cutoff:%Y-%m-%d %H:%M} UTC neu (--full für alle).")
+
     try:
-        statuses = list(iter_statuses(username, token, limit=args.limit, since=args.since))
+        statuses = list(iter_statuses(
+            username, token, limit=args.limit, since=args.since, stop_before=cutoff,
+        ))
     except ApiError as e:
         log(f"Abruf der Statuses fehlgeschlagen: {e}")
         return 1
     log(f"Insgesamt {len(statuses)} Statuses geladen.")
+    if cutoff is not None:
+        fetched = len(statuses)
+        if args.since:
+            existing = [s for s in existing if (status_date(s) or "") > args.since]
+        statuses = merge_incremental(statuses, existing)
+        log(f"Zusammengeführt: {fetched} neu geladen + {len(statuses) - fetched} "
+            f"aus {args.output} = {len(statuses)} Statuses.")
 
-    trip_cache = None
     if not args.skip_trips:
         if args.refresh_trips:
             cache = {}
@@ -817,6 +907,7 @@ def main(argv=None):
             tid = (status.get("checkin") or {}).get("trip")
             stopovers, err = cache.get(tid, (None, "keine Trip-ID im Status"))
             status["trip"] = {"stopovers": stopovers} if stopovers else None
+            status.pop("trip_error", None)
             if err:
                 status["trip_error"] = err
                 errors += 1
@@ -829,8 +920,6 @@ def main(argv=None):
                 "'read-statuses'. Mit OAuth: erneut `--login`; "
                 "mit PAT: Token inkl. read-statuses neu ausstellen."
             )
-
-        trip_cache = cache
 
     # Operator-Namen vereinheitlichen (manuelle Mapping-Datei, vor dem Schreiben).
     try:
@@ -851,10 +940,10 @@ def main(argv=None):
     if not args.skip_trips and not args.no_stations:
         station_cache = {} if args.refresh_stations else load_station_cache(args.stations_output)
         stations = resolve_stations(statuses, token, cache=station_cache)
-        apply_identifiers_to_statuses(statuses, stations)
-        if trip_cache is not None:
-            apply_identifiers_to_trip_cache(trip_cache, stations)
-            save_trip_cache(args.trips_output, trip_cache)
+
+    # Identifier erst nach resolve_stations entfernen: liefert die API sie am
+    # station-Objekt mit, spart das dort den Einzelabruf /station/{id}.
+    strip_identifiers_from_statuses(statuses)
 
     try:
         ensure_parent_dir(args.output)

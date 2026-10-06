@@ -1,5 +1,5 @@
 {
-  "_comment": "Operator einer bestimmten Linie überschreiben. Sonderfälle, kein Editor. line = checkin.lineName, operator = aktueller Name (nach operator_replacements.json), name = Ersatz. Gilt nur beim Dashboard-Bau auf Kopien; statuses.json bleibt unverändert.",
+  "_comment": "Operator einer bestimmten Linie überschreiben. Sonderfälle; bearbeitbar im Editor unter Betreiber je Linie. line = checkin.lineName, operator = aktueller Name (nach operator_replacements.json), name = Ersatz. Gilt nur beim Dashboard-Bau auf Kopien; statuses.json bleibt unverändert.",
   "rules": [
     {
       "line": "S2",

@@ -48,6 +48,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── walita.py              # Einstiegspunkt: Export + Dashboard (+ --edit)
 ├── download_statuses.py   # Stufe 1: Export von der Träwelling-API
 ├── status_editor.py       # Tag-Editor (tkinter): Tags + Text live ändern
+├── editor_settings.py     # Einstellungsseiten des Tag-Editors (je Konfig-Datei)
 ├── edge_patches.py        # Lokale Via-Patches für grobe Kanten
 ├── station_patches.py     # Lokale Stations-Patches (Koordinaten / Merges)
 ├── line_color_patches.py  # Lokale Linienfarben-Patches je Status
@@ -55,6 +56,8 @@ python3 walita.py --demo    # ohne Token ausprobieren
 ├── home_region.py         # Lokale Operator-Liste der Heimatregion
 ├── vehicle_roster.py      # Lokaler Fuhrpark: Fahrzeugnummern je Baureihe
 ├── operator_line_patches.py  # Operator einer Linie (Sonderfälle)
+├── operator_replacements.py  # Betreibernamen laden/speichern (Editor)
+├── loc_class_families.py  # Baureihenfamilien laden/speichern (Editor)
 ├── auth.py                # OAuth-Login (PKCE)
 ├── build_dashboard.py     # Stufe 2: Dashboard aus den JSON-Dateien
 ├── dashboard/             # HTML/CSS/JS-Quellen (werden in eine HTML-Datei gepackt)
@@ -77,7 +80,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 
 > **Hinweis:** Eigene Reisedaten unter `data/` (`statuses.json`, `stations.json`,
 > `trips.json`, `dashboard.html`, `oauth_token.json`, `edge_patches.json`,
-> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`, `vehicle_roster.json`) sind persönlich und
+> `station_patches.json`, `line_color_patches.json`, `boarding_patches.json`, `home_region.json`, `vehicle_roster.json`, `editor_state.json`) sind persönlich und
 > gitignored. Zum Ausprobieren ohne Token: [Demo](#demo).
 
 ## Voraussetzungen
@@ -102,6 +105,7 @@ python3 walita.py --demo    # ohne Token ausprobieren
 python3 walita.py --login             # einmalig: OAuth, dann Export + Dashboard
 python3 walita.py                     # Update: Token/Caches nutzen, Dashboard öffnen
 python3 walita.py --since 2026-01-01  # nur Fahrten ab dem 02.01.2026
+python3 walita.py --full              # alle Statuses laden (für Änderungen an älteren Fahrten)
 python3 walita.py --edit              # Tag-Editor (Tags + Text live ändern)
 python3 walita.py --demo              # Demo ohne Token
 ```
@@ -144,6 +148,7 @@ neu eingeloggt.
 | Option | Beschreibung |
 | --- | --- |
 | `--limit N` | Maximal N Statuses laden (Tests) |
+| `--full` | Alle Statuses laden; ohne Flag nur neue und die letzten 2 Tage |
 | `--since YYYY-MM-DD` | Nur Statuses mit Abfahrt **strikt nach** diesem Tag |
 | `--skip-trips` | Keine Zwischenhalte nachladen (kein `/stopovers`) |
 | `--refresh-trips` | `trips.json`-Cache ignorieren, alle Trips neu von der API |
@@ -203,7 +208,13 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
 1. `GET /auth/user` → Benutzername.
 2. `GET /user/{username}/statuses?withIdentifiers=true`, paginiert über `links.next`.
    Pro Status nur Start- und Zielhalt (Identifier, falls die API sie an diesem
-   Endpoint mitgibt).
+   Endpoint mitgibt). Die Liste ist nach Abfahrt absteigend sortiert. Liegt
+   `statuses.json` schon vor, wird nur geblättert, bis die Seite vor dem
+   neuesten bekannten vergangenen Status minus 2 Tage endet (meist 1–2 Seiten).
+   Was davor liegt, bleibt aus der Datei; Statuses im neu geladenen Bereich,
+   die die API nicht liefert, gelten als gelöscht. Wer eine ältere Fahrt
+   nachträglich ändert oder eincheckt, lädt mit `--full` alles neu. `--limit`
+   lädt ebenfalls ohne Abgleich mit der Datei.
 3. `GET /stopovers/{tripIds}?withIdentifiers=true` → Zwischenhalte, als Feld
    `trip.stopovers` am Status.
    Die Trip-ID steht schon als `checkin.trip` im Status, es sind also bis zu 50
@@ -214,23 +225,24 @@ Unter `data/` (Ordner wird bei Bedarf angelegt):
    `statuses.json` übernommen.
 4. Stations-Koordinaten kommen aus dem `station`-Objekt jedes Stopovers. Fehlen
    Koordinaten oder Identifier, wird `GET /station/{id}?withIdentifiers=true`
-   nachgeladen → `stations.json`. Dieselben Identifier werden vor dem Schreiben
-   in `statuses.json` (Origin, Destination, Zwischenhalte) und `trips.json`
-   übernommen. Ein vorhandener Cache ohne Identifier wird einmalig nachgezogen;
+   nachgeladen → `stations.json`. Identifier stehen nur dort; `statuses.json`
+   und `trips.json` enthalten an den Halten keine Identifier. Ein
+   vorhandener Cache ohne Identifier wird einmalig nachgezogen;
    `--refresh-stations` holt alles neu.
 5. Vor dem Schreiben von `statuses.json` werden Operator-Namen anhand von
    [`operator_replacements.json`](operator_replacements.json) vereinheitlicht
-   (`checkin.operator.name`: Rohname → kanonischer Name). Die Datei ist manuell
-   zu pflegen; Schlüssel mit führendem `_` (Kommentare) werden ignoriert.
+   (`checkin.operator.name`: Rohname → kanonischer Name). Bearbeitbar im
+   Tag-Editor unter **Betreiber → Namen**; Schlüssel mit führendem `_`
+   (Kommentare) werden ignoriert.
    Fehlt die Datei, bleibt alles unverändert.
 
 ### Operator je Linie
 
 Steht eine Linie unter dem falschen Operator, setzt
 [`operator_line_patches.json`](operator_line_patches.json) den Namen beim
-Dashboard-Bau auf einer Kopie um. `statuses.json` bleibt unverändert, es gibt
-keinen Editor: die Datei ist der Sonderfall. Die Heimatregion filtert danach,
-die Linie zählt also unter dem neuen Operator.
+Dashboard-Bau auf einer Kopie um. `statuses.json` bleibt unverändert.
+Bearbeitbar im Tag-Editor unter **Betreiber → Je Linie**. Die Heimatregion
+filtert danach, die Linie zählt also unter dem neuen Operator.
 
 ```json
 {
@@ -254,8 +266,9 @@ Baureihenfamilien für den Kartenfilter stehen in
 Baureihe → Familie; dieselbe Baureihe darf mehrfach vorkommen und steht
 dann in mehreren Familien). Schlüssel mit führendem `_` werden ignoriert,
 fehlende Datei = keine Familien. Die Datei wird erst beim Dashboard-Bau
-gelesen, nicht beim Export. Die Endung `.txt` verhindert die
-Duplicate-Key-Warnung des Editors; der Loader liest alle Paare.
+gelesen, nicht beim Export. Bearbeitbar im Tag-Editor unter
+**Fahrzeuge → Baureihenfamilien**. Die Endung `.txt` verhindert die
+Duplicate-Key-Warnung von Text-Editoren; der Loader liest alle Paare.
 
 ### Kanten-Patches (physische Via-Stationen)
 
@@ -330,7 +343,9 @@ lässt `stations.json` / `statuses.json` unverändert.
   (Default `data/station_patches.json`).
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
 
-Im Tag-Editor öffnet **Stationen anpassen** einen lokalen Server
+Im Tag-Editor listet **Karte → Stationen** alle Verschiebungen (mit Abstand in
+Metern) und Zusammenlegungen; einzelne Einträge lassen sich dort löschen.
+**Stationskarte öffnen** startet einen lokalen Server
 (`http://127.0.0.1:8712/`) mit Leaflet. Marker der befahrenen Stationen sind
 ziehbar (sofort gespeichert). Zwei Stationen wählen, **Wird aufgelöst** /
 **Bleibt**, dann **Zusammenführen**. Listen in der Sidebar setzen Moves und
@@ -359,16 +374,15 @@ unverändert.
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
 
 Im Tag-Editor zeigt **Linienfarbe** rechts zur gewählten Fahrt die aktuelle
-Farbe (Träwelling / lokal / keine). **Ändern** öffnet Hex-Eingabe und
+Farbe (HAFAS / lokal / keine). **Ändern** öffnet Hex-Eingabe und
 Farbwähler; die Textfarbe wird aus dem Kontrast gesetzt. **Zurücksetzen**
 entfernt nur den lokalen Patch.
 
-**Linienfarben…** (Leiste unten) listet alle vorhandenen lokalen Linienfarben,
-gruppiert nach Linie und Operator, jede Zeile in ihrer Farbe. **Farbe
-ändern…** (oder Doppelklick) auf einer Linie ändert alle ihre Einträge, auf
-einer aufgeklappten Fahrt nur diese; **Löschen** entfernt entsprechend.
-Erst **Speichern** schreibt `data/line_color_patches.json`. Neue Farben
-entstehen weiter über die Fahrt.
+**Darstellung → Linienfarben** listet alle lokalen Linienfarben, gruppiert
+nach Linie und Operator, jede Zeile in ihrer Farbe. **Bearbeiten** (oder
+Doppelklick) auf einer Linie ändert alle ihre Einträge, auf einer Fahrt nur
+diese; **Löschen** entfernt entsprechend. Jede Änderung schreibt sofort
+`data/line_color_patches.json`. Neue Farben entstehen über die Fahrt.
 
 ### Einstiegs-Patches
 
@@ -392,10 +406,10 @@ gilt der Patch für diese Fahrt nicht.
 Fahrzeit und Kilometer der Kopie folgen dem neuen Abschnitt. Die Fahrzeit
 kommt aus Abfahrt am neuen Halt und Ankunft am Ausstieg. Die Kilometer kommen
 aus anderen Fahrten: zuerst dieselbe Haltfolge, sonst die Summe bekannter
-Einzelkanten, sonst beim späteren Einstieg die bisherige Strecke minus das
+Einzelkanten, sonst beim späteren Einstieg die API-Strecke minus das
 bekannte Präfix (beim früheren Einstieg plus die zusätzlichen Kanten). Eine
-Kante ist bekannt, wenn eine andere Fahrt genau dieses Stationspaar gefahren
-ist; fehlt in einer längeren Fahrt nur noch eine Kante, bekommt sie die
+Kante ist bekannt, wenn eine andere Fahrt genau dieses Stationspaar
+abdeckt; fehlt in einer längeren Fahrt nur noch eine Kante, bekommt sie die
 Reststrecke. Die Luftlinie ist nur der Ersatz, wenn keine dieser Quellen
 reicht. Punkte bleiben die Träwelling-Punkte. Die Kanten-Maße werden einmal
 aus allen Fahrten gelernt und gelten auch im Heimat-Lauf.
@@ -404,10 +418,11 @@ aus allen Fahrten gelernt und gelten auch im Heimat-Lauf.
   (Default `data/boarding_patches.json`).
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
 
-Im Tag-Editor zeigt **Einstieg** rechts zur gewählten Fahrt den wirksamen Halt
-(Träwelling oder lokal inkl. Träwelling-Name). **Ändern** listet die Halte vor
-dem Ausstieg. **Zurücksetzen** entfernt nur den lokalen Patch. **Speichern**
-schickt den Einstieg nicht nach Träwelling.
+Im Tag-Editor zeigt **Einstieg** (Gruppe *Fahrtverlauf*) zur gewählten Fahrt
+den wirksamen Halt (laut Träwelling oder lokal inkl. Träwelling-Name).
+**Ändern** listet die Halte vor dem Ausstieg. **Zurücksetzen** entfernt nur
+den lokalen Patch. **Speichern** schickt den Einstieg nicht nach Träwelling.
+**Darstellung → Einstiege** listet alle lokalen Einstiege mit **Zur Fahrt**.
 
 ### Heimatregion
 
@@ -436,10 +451,10 @@ der Liste als `""` und im Editor als „(ohne Operator)“.
   Ab 761px stehen beide Knöpfe untereinander.
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
 
-Im Tag-Editor öffnet **Heimatregion…** eine Checkbox-Liste aller Operatoren
-aus den geladenen Fahrten, plus Namen, die schon in der Datei stehen. Suche,
-**Alle** und **Keine** gelten für die gerade sichtbaren Zeilen. Speichern
-schreibt nur die lokale Datei, nicht nach Träwelling.
+Im Tag-Editor zeigt **Betreiber → Heimatregion** alle Operatoren aus den
+geladenen Fahrten (mit Fahrtenanzahl) plus Namen, die schon in der Datei
+stehen. Klick auf ✓ oder Leertaste schaltet um, **nur angehakte** filtert.
+Jede Änderung schreibt sofort die lokale Datei, nicht nach Träwelling.
 
 ### Fuhrpark
 
@@ -478,9 +493,10 @@ benachbarten Zeilen mit Differenz ±1.
   überspringt sie.
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
 
-Im Tag-Editor öffnet **Fuhrpark…** die Baureihen aus den geladenen Fahrten plus
-schon gespeicherte Typen. Speichern schreibt nur die lokale Datei, nicht nach
-Träwelling.
+Im Tag-Editor zeigt **Fahrzeuge → Fuhrpark** links die Baureihen aus den
+geladenen Fahrten plus schon gespeicherte Typen, rechts deren Nummern mit
+Status, Ausmusterungsdatum und Anzahl der Fahrten. Jede Änderung schreibt
+sofort die lokale Datei, nicht nach Träwelling.
 
 ### OAuth-Login
 
@@ -523,7 +539,7 @@ zusammengefügt. Sieben Ansichten:
   Datumsbereich (Von/Bis). Die Überschrift nennt die gerade gesetzten Filter.
   Gemappte Baureihenfamilien erscheinen zusätzlich im Dropdown „Baureihe“
   (Auswahl der Familie zeigt alle Mitglieds-Baureihen).
-  Dicke und Farbe zeigen, wie oft ein Segment befahren wurde, der Pfeil die
+  Dicke und Farbe zeigen die Anzahl der Fahrten über ein Segment, der Pfeil die
   Richtung. Das Dropdown **Darstellung** schaltet auf **Fahrzeuge**: je
   Fahrzeug eine eigene Farbe. Der Farbkreis umfasst nur die Fahrzeuge des
   aktuellen Filters und wird beim Filterwechsel neu vergeben. Die Farben
@@ -542,10 +558,10 @@ zusammengefügt. Sieben Ansichten:
   aktuelle Filter noch zeigt. Nur in diesem Modus werden Kanten desselben Fahrzeugs über
   Zwischenstationen mit einer Kurve verbunden, und zwar nur dort, wo eine
   Fahrt unter dem aktuellen Filter tatsächlich von der einen Kante auf die
-  andere weitergefahren ist. Die häufigste Folge setzt den Pfad fort, jede
+  andere weiterfährt. Die häufigste Folge setzt den Pfad fort, jede
   weitere gefahrene Folge an der Station wird als Abzweig ebenfalls mit einer
-  Kurve angebunden (als eigener Pfad). Wo nur ein- oder ausgestiegen wurde,
-  gibt es keine Kurve. Eine Durchbindung (`dubi=ende`, als nächster Check-in
+  Kurve angebunden (als eigener Pfad). Ein reiner Ein- oder Ausstieg
+  bekommt keine Kurve. Eine Durchbindung (`dubi=ende`, als nächster Check-in
   nach Check-in-Zeit `dubi=start` ab derselben Station) gilt als durchgehende
   Fahrt: bei Fahrzeugen, die auf beiden getaggt sind, im Linienmodus bei
   gleicher Linie, im Baureihenmodus bei gleicher Baureihe. **Linien** zeichnet genauso, nur je Linie statt je
@@ -629,34 +645,59 @@ python3 build_dashboard.py --operator-line-patches operator_line_patches.json --
 
 ## Tag-Editor
 
-Lokales tkinter-Fenster. Die **Fahrtliste** ist eine Tabelle mit Datum, Linie,
-Von, Nach, **Baureihe** und **Fahrzeugnummer**. Die beiden letzten Spalten
-sind inline editierbar (Enter = nächste Zeile, Tab = nächste Spalte). Änderungen
-bleiben zuerst lokal gestagt (geänderte Zeilen fett). **Speichern** (Ctrl+S)
-öffnet ein Übertragungsfenster (Fahrt für Fahrt: Wartend / Übertrage /
-Gespeichert / Fehler) und schreibt den Diff nach Träwelling (`PUT /status/{id}` nur für `body`; Tags über
-`POST`/`PUT`/`DELETE /status/{id}/tags`). **Dashboard neu bauen** erzeugt
-`data/dashboard.html` aus der Datei (nicht aus ungespeichertem Staging).
+Lokales tkinter-Fenster mit drei Bereichen:
 
-Ziel, Sichtbarkeit, Event und der Laufweg bleiben unberührt. In
-`data/statuses.json` werden nach dem Speichern nur `body` und `tags`
-aktualisiert. Weitere Tags (Sitz, Wagen, …) stehen rechts zur gewählten Fahrt.
-**dubi start** und **dubi ende** (Durchbindung) sind Checkboxen an dieser Fahrt:
-der Fahrtbeginn zählt nicht als Einstieg, das Fahrtende nicht als Ausstieg.
-**Speichern** schreibt die Tags mit.
-Die Sektion **Kanten** listet die Folge-Kanten; **Auf Karte anreichern** setzt
-lokale Via-Patches (`data/edge_patches.json`, siehe [Kanten-Patches](#kanten-patches-physische-via-stationen)).
-**Stationen anpassen** verschiebt Koordinaten und führt Stations-IDs zusammen
-(`data/station_patches.json`, siehe [Stations-Patches](#stations-patches-koordinaten-und-merges)).
-**Linienfarbe** ändert `routeColor` der gewählten Fahrt lokal
-(`data/line_color_patches.json`, siehe [Linienfarben-Patches](#linienfarben-patches)).
-**Einstieg** legt den Zustieg auf einen anderen Halt derselben Fahrt
-(`data/boarding_patches.json`, siehe [Einstiegs-Patches](#einstiegs-patches)).
-**Heimatregion…** hakt die Operatoren an, die der Schalter **Heimat**
-durchlässt (`data/home_region.json`, siehe [Heimatregion](#heimatregion)).
-**Fuhrpark…** pflegt die Fahrzeugnummern je Baureihe
-(`data/vehicle_roster.json`, siehe [Fuhrpark](#fuhrpark)).
-Danach Dashboard neu bauen.
+- **Werkzeugleiste**: *Von API laden* (Strg+R), *Speichern (n)* (Strg+S) mit der
+  Anzahl ungespeicherter Fahrten, *Dashboard bauen*.
+- **Navigation** links: *Fahrten* mit den Ansichten *Alle*, *Ohne Baureihe* und
+  *Geändert*, darunter je Konfig-Datei eine Einstellungsseite.
+- **Inhalt** der gewählten Seite.
+
+**Fahrten.** Filter über Suche (Strg+F), Zeitraum, Betreiber und die Häkchen
+*ohne Baureihe*, *ohne Nummer*, *mit lokalem Patch*, *geändert*. Spalten:
+Datum, Linie, Von → Nach, Betreiber, Baureihe, Nummer und ◆ mit den lokalen
+Patches der Fahrt (E Einstieg, F Farbe, K Kante, D Durchbindung). Baureihe und
+Nummer sind direkt in der Liste editierbar (Klick oder F2; Enter = nächste
+Zeile, Tab = nächste Spalte). Geänderte Fahrten sind fett und mit ● markiert.
+
+Rechts stehen die Details der gewählten Fahrt in einklappbaren Gruppen:
+
+| Gruppe | Inhalt | Ziel |
+| --- | --- | --- |
+| Fahrzeug | Baureihe (Auswahl oder frei), Nummer, Hinweis ob im Fuhrpark | Träwelling |
+| Fahrtverlauf | Einstieg, Durchbindung (`dubi=start` / `dubi=ende`), Kanten mit **Auf Karte anreichern** und **Patch entfernen ▾** | lokal (Durchbindung: Träwelling) |
+| Darstellung | Linienfarbe | lokal |
+| Text & Tags | Status-Text, weitere Tags (Sitz, Wagen, …) | Träwelling |
+
+**Speichern** öffnet ein Übertragungsfenster (Fahrt für Fahrt: Wartend /
+Übertrage / Gespeichert / Fehler) und schreibt den Diff nach Träwelling
+(`PUT /status/{id}` nur für `body`; Tags über
+`POST`/`PUT`/`DELETE /status/{id}/tags`). Ziel, Sichtbarkeit, Event und der
+Laufweg bleiben unberührt. In `data/statuses.json` werden danach nur `body`
+und `tags` aktualisiert. **Dashboard bauen** erzeugt `data/dashboard.html` aus
+der Datei (nicht aus ungespeichertem Staging).
+
+**Einstellungen.** Jede Seite zeigt den kompletten Inhalt ihrer Datei als
+Tabelle mit Suche, Sortierung, **Hinzufügen / Bearbeiten / Löschen** und
+schreibt sofort beim Bestätigen. Einträge ohne Bezug in den geladenen Daten
+sind grau, **Verwaiste entfernen** löscht sie.
+
+| Seite | Datei | wirkt |
+| --- | --- | --- |
+| Fahrzeuge → Fuhrpark | `data/vehicle_roster.json` | beim Dashboard-Bau |
+| Fahrzeuge → Baureihenfamilien | `loc_class_families.txt` | beim Dashboard-Bau |
+| Betreiber → Heimatregion | `data/home_region.json` | beim Dashboard-Bau |
+| Betreiber → Namen | `operator_replacements.json` | **beim nächsten Export** |
+| Betreiber → Je Linie | `operator_line_patches.json` | beim Dashboard-Bau |
+| Karte → Kanten | `data/edge_patches.json` | beim Dashboard-Bau |
+| Karte → Stationen | `data/station_patches.json` | beim Dashboard-Bau |
+| Darstellung → Linienfarben | `data/line_color_patches.json` | beim Dashboard-Bau |
+| Darstellung → Einstiege | `data/boarding_patches.json` | beim Dashboard-Bau |
+
+Ist eine Datei kein gültiges JSON, zeigt die Seite den Fehler und bleibt
+schreibgeschützt; die Datei wird nicht überschrieben. Nach dem Korrigieren die
+Seite erneut wählen. Sortierung, Spaltenbreiten, eingeklappte Gruppen und die
+zuletzt gewählte Seite stehen in `data/editor_state.json`.
 
 ```bash
 python3 walita.py --edit
@@ -682,6 +723,7 @@ python3 download_statuses.py                 # -> data/statuses.json (+ trips/st
 python3 download_statuses.py --limit 3
 python3 download_statuses.py --skip-trips
 python3 download_statuses.py --since 2026-01-01
+python3 download_statuses.py --full                 # alle Statuses laden
 python3 download_statuses.py --refresh-trips
 python3 download_statuses.py -o export.json
 python3 status_editor.py                         # Tag-Editor

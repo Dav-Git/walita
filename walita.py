@@ -9,6 +9,7 @@ Führt nacheinander `download_statuses` und `build_dashboard` aus (Defaults unte
     python3 walita.py                 # Export + Dashboard, öffnet im Browser
     python3 walita.py --login         # OAuth-Login, dann Export + Dashboard
     python3 walita.py --since 2026-01-01  # nur Fahrten nach diesem Datum
+    python3 walita.py --full          # alle Statuses laden (Default: neue + letzte Tage)
     python3 walita.py --no-open       # ohne Browser
     python3 walita.py --demo          # Demo aus examples/ (kein Token nötig)
     python3 walita.py --dashboard-only  # nur Dashboard neu erzeugen aus vorhandener data/
@@ -72,6 +73,11 @@ def main(argv=None):
     export.add_argument(
         "--limit", type=int, default=None,
         help="Max. Anzahl Statuses (zum Testen).",
+    )
+    export.add_argument(
+        "--full", action="store_true",
+        help="Alle Statuses laden; ohne Flag nur neue und die letzten Tage "
+             "(für Änderungen an älteren Fahrten).",
     )
     export.add_argument(
         "--since", metavar="YYYY-MM-DD", default="",
@@ -182,7 +188,8 @@ def main(argv=None):
             flag for flag, dest in (
                 ("--token", "token"), ("--login", "login"),
                 ("--client-id", "client_id"), ("--redirect-uri", "redirect_uri"),
-                ("--manual", "manual"), ("--limit", "limit"), ("--since", "since"),
+                ("--manual", "manual"), ("--limit", "limit"), ("--full", "full"),
+                ("--since", "since"),
                 ("--skip-trips", "skip_trips"), ("--refresh-trips", "refresh_trips"),
                 ("--refresh-stations", "refresh_stations"),
                 ("--no-stations", "no_stations"),
@@ -231,6 +238,7 @@ def main(argv=None):
         edit_argv.extend(["--boarding-patches", args.boarding_patches])
         edit_argv.extend(["--vehicle-roster", args.vehicle_roster])
         edit_argv.extend(["--operator-line-patches", args.operator_line_patches])
+        edit_argv.extend(["--operator-replacements", args.operator_replacements])
         return status_editor.main(edit_argv)
 
     if args.demo:
@@ -268,6 +276,8 @@ def main(argv=None):
         dl_argv.extend(["--oauth-token-file", args.oauth_token_file])
         if args.limit is not None:
             dl_argv.extend(["--limit", str(args.limit)])
+        if args.full:
+            dl_argv.append("--full")
         if args.since:
             dl_argv.extend(["--since", args.since])
         if args.skip_trips:

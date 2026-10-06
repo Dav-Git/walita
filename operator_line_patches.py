@@ -3,9 +3,9 @@
 # Copyright (C) 2026 besuka97
 """Lokale Operator-Patches je Linie.
 
-Sonderfälle, in denen eine Linie unter dem falschen Operator steht.
-Kein Editor, keine API-Schreibzugriffe: die Regeln liegen fest in
-`operator_line_patches.json` und gelten beim Dashboard-Bau nur auf Kopien.
+Sonderfälle, in denen eine Linie unter dem falschen Operator steht. Die
+Regeln liegen in `operator_line_patches.json`, der Editor bearbeitet sie auf
+der Seite „Betreiber je Linie“. Sie gelten beim Dashboard-Bau nur auf Kopien;
 `statuses.json` bleibt unverändert.
 """
 
@@ -110,3 +110,46 @@ def apply_to_statuses(rules, statuses):
         out.append(item)
         changed += 1
     return out, changed
+
+
+def load_document(path):
+    """{comments: [(k, v)], rules: [(line, operator, name)]} für den Editor."""
+    rules = load_rules(path)
+    comments = []
+    if path and os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        comments = [
+            (k, v) for k, v in data.items()
+            if isinstance(k, str) and k.startswith("_")
+        ]
+    return {"comments": comments, "rules": rules}
+
+
+def save_rules(path, rules, comments=()):
+    """Schreibt Kommentare und Regeln atomar. Gibt True bei Erfolg."""
+    if not path:
+        return False
+    payload = {}
+    for key, value in comments or ():
+        payload[key] = value
+    payload["rules"] = [
+        {"line": line, "operator": operator, "name": name}
+        for line, operator, name in rules
+    ]
+    parent = os.path.dirname(path)
+    tmp = path + ".tmp"
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True

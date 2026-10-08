@@ -155,6 +155,11 @@ def main(argv=None):
              "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
     )
     dash.add_argument(
+        "--line-patches", default="data/line_patches.json",
+        help="Liniennamen je Fahrt und zusammengeführte Linien "
+             "(Default: data/line_patches.json).",
+    )
+    dash.add_argument(
         "--operator-line-patches", default="data/operator_line_patches.json",
         help="Operator einer Linie überschreiben "
              "(Default: data/operator_line_patches.json; fehlende Datei = keine Änderung).",
@@ -238,6 +243,7 @@ def main(argv=None):
         edit_argv.extend(["--boarding-patches", args.boarding_patches])
         edit_argv.extend(["--vehicle-roster", args.vehicle_roster])
         edit_argv.extend(["--operator-line-patches", args.operator_line_patches])
+        edit_argv.extend(["--line-patches", args.line_patches])
         edit_argv.extend(["--operator-replacements", args.operator_replacements])
         return status_editor.main(edit_argv)
 
@@ -259,6 +265,7 @@ def main(argv=None):
         dash_argv.extend(["--boarding-patches", args.boarding_patches])
         dash_argv.extend(["--vehicle-roster", args.vehicle_roster])
         dash_argv.extend(["--operator-line-patches", args.operator_line_patches])
+        dash_argv.extend(["--line-patches", args.line_patches])
         return build_dashboard.main(dash_argv)
 
     if not args.dashboard_only:
@@ -307,6 +314,7 @@ def main(argv=None):
     dash_argv.extend(["--boarding-patches", args.boarding_patches])
     dash_argv.extend(["--vehicle-roster", args.vehicle_roster])
     dash_argv.extend(["--operator-line-patches", args.operator_line_patches])
+    dash_argv.extend(["--line-patches", args.line_patches])
     return build_dashboard.main(dash_argv)
 
 

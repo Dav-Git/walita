@@ -37,6 +37,8 @@ from line_color_patches import load_patches as load_line_color_patches
 from line_color_patches import status_id as color_status_id
 from line_color_patches import to_css_pair
 from home_region import filter_statuses, load_operators
+from line_patches import apply_to_statuses as apply_line_patches
+from line_patches import load_patches as load_line_patches
 from operator_line_patches import apply_to_statuses as apply_operator_line_patches
 from operator_line_patches import load_rules as load_operator_line_rules
 from vehicle_roster import load_roster
@@ -1318,8 +1320,7 @@ def build_data(statuses, stations, ignore_plus=False, loc_class_families=None,
             note_stop(sid, 8)
             mark_pass_node(sid)
             mark_line_role(sid, lk, "passed")
-            if lk:
-                _get_dated(station_line, (sid, lk)).add(date_str)
+            # Physische Durchfahrt: kein Halt, also kein Tagesziel Station × Linie.
         prev_edge = None
         first_edge = None
         for a, b in zip(expanded, expanded[1:]):
@@ -2363,6 +2364,11 @@ def main(argv=None):
              "(Default: data/vehicle_roster.json; fehlende Datei = keine Nummernliste).",
     )
     parser.add_argument(
+        "--line-patches", default="data/line_patches.json",
+        help="Liniennamen je Fahrt und zusammengeführte Linien "
+             "(Default: data/line_patches.json; fehlende Datei = nur walita:line-Tags).",
+    )
+    parser.add_argument(
         "--operator-line-patches", default="data/operator_line_patches.json",
         help="Operator einer Linie überschreiben "
              "(Default: data/operator_line_patches.json; fehlende Datei = keine Änderung).",
@@ -2453,6 +2459,17 @@ def main(argv=None):
             f"aus {args.vehicle_roster}.")
     elif os.path.isfile(args.vehicle_roster):
         log(f"Fuhrpark: {args.vehicle_roster} enthält keine Nummern.")
+
+    try:
+        line_patches = load_line_patches(args.line_patches)
+    except ValueError as e:
+        log(f"Fehler: {e}")
+        return 2
+    statuses, n_line = apply_line_patches(line_patches, statuses)
+    if n_line:
+        log(f"Linien-Patches: {n_line} Fahrten umbenannt "
+            f"({len(line_patches['overrides'])} je Fahrt, "
+            f"{len(line_patches['merges'])} Merges, Rest aus walita:line-Tags).")
 
     try:
         operator_line_rules = load_operator_line_rules(args.operator_line_patches)

@@ -43,6 +43,12 @@
     color:var(--fg); padding:6px 10px; cursor:pointer; font:inherit; }
   #hits button:hover { background:#1b2740; }
   #hits .meta { color:var(--muted); font-size:11px; }
+  .daterow { display:flex; gap:6px; align-items:center; }
+  .daterow input { flex:1; min-width:0; background:#0b1220; color:var(--fg);
+    border:1px solid var(--border); border-radius:8px; padding:6px 10px; font:inherit;
+    color-scheme:dark; }
+  .daterow button { background:#1b2740; color:var(--muted); border:1px solid var(--border);
+    border-radius:8px; padding:6px 10px; cursor:pointer; font:inherit; }
 </style>
 </head>
 <body>
@@ -67,6 +73,14 @@
       <input id="q" type="search" placeholder="Station suchen …" autocomplete="off">
     </div>
     <div id="hits"></div>
+  </div>
+  <div>
+    <div class="muted">Entdeckt ab (erste Fahrt mit dieser Station)</div>
+    <div class="daterow">
+      <input id="since" type="date" title="Stationen mit erster Sichtung vor diesem Datum ausblenden">
+      <button type="button" id="sinceClear" title="Datum leeren">×</button>
+    </div>
+    <div class="muted" id="sinceInfo"></div>
   </div>
   <div class="legend">
     Start/Ziel · Korridor 20 km um die Luftlinie klickbar · weitere Stationen per Suche.
@@ -94,6 +108,32 @@
   let stationById=new Map();
   let markers=new Map();
   let line=null;
+  const SINCE_KEY="walita-edgemap-since";
+  const sinceEl=document.getElementById("since");
+  const sinceInfoEl=document.getElementById("sinceInfo");
+  function loadSince(){
+    try{ return localStorage.getItem(SINCE_KEY)||""; }catch(e){ return ""; }
+  }
+  function storeSince(v){
+    try{ if(v) localStorage.setItem(SINCE_KEY, v); else localStorage.removeItem(SINCE_KEY); }catch(e){}
+  }
+  sinceEl.value=loadSince();
+  // Ohne Datum oder ohne bekannte erste Sichtung bleibt eine Station sichtbar.
+  function seenOk(st){
+    const since=sinceEl.value;
+    return !since || !st.firstSeen || st.firstSeen>=since;
+  }
+  function paintSinceInfo(total, hidden){
+    sinceInfoEl.textContent=sinceEl.value&&hidden
+      ? hidden+" von "+total+" Stationen ausgeblendet."
+      : "";
+  }
+  function onSinceChange(){
+    storeSince(sinceEl.value);
+    paintMarkers();
+  }
+  sinceEl.addEventListener("change", onSinceChange);
+  document.getElementById("sinceClear").onclick=()=>{ sinceEl.value=""; onSinceChange(); };
 
   const map=L.map("map",{preferCanvas:true,maxZoom:19}).setView([51,10],6);
   const PROVIDERS=[
@@ -176,7 +216,10 @@
     if(idx>=0) return "<b>"+esc(st.name)+"</b><br>Via "+(idx+1);
     const served=(ctx.servedIds||[]).some(x=>sid(x)===id);
     if(served) return "<b>"+esc(st.name)+"</b><br>bereits Halt dieser Fahrt";
-    return "<b>"+esc(st.name)+"</b><br>Klick: als Via hinzufügen";
+    return "<b>"+esc(st.name)+"</b><br>Klick: als Via hinzufügen"+seenLine(st);
+  }
+  function seenLine(st){
+    return st.firstSeen?"<br><span style=\"color:#93a2b8\">entdeckt "+esc(st.firstSeen)+"</span>":"";
   }
   function esc(s){
     return String(s==null?"":s).replace(/[&<>"']/g, c=>({
@@ -202,14 +245,23 @@
     if(ctx.from) all.push(ctx.from);
     (ctx.stations||[]).forEach(s=>all.push(s));
     if(ctx.to) all.push(ctx.to);
+    // Start/Ziel, Via und Halte dieser Fahrt bleiben unabhängig vom Datum.
+    const fromId=sid(ctx.from&&ctx.from.id), toId=sid(ctx.to&&ctx.to.id);
+    const keep=new Set([fromId, toId, ...via.map(sid), ...(ctx.servedIds||[]).map(sid)]);
+    let total=0, hidden=0;
     all.forEach(st=>{
       if(st.lat==null||st.lon==null) return;
+      if(!keep.has(sid(st.id))){
+        total++;
+        if(!seenOk(st)){ hidden++; return; }
+      }
       const m=L.circleMarker([st.lat,st.lon], styleFor(st))
         .bindPopup(popupFor(st))
         .addTo(map);
       m.on("click", ()=>onStationClick(st));
       markers.set(sid(st.id), m);
     });
+    paintSinceInfo(total, hidden);
   }
   function onStationClick(st){
     const i=via.findIndex(x=>sid(x)===sid(st.id));
@@ -301,7 +353,8 @@
     lastHits.forEach(st=>{
       const btn=document.createElement("button");
       btn.type="button";
-      const dist=st.distKm!=null?` · ${st.distKm} km zur Sehne`:"";
+      const dist=(st.distKm!=null?` · ${st.distKm} km zur Sehne`:"")
+        +(st.firstSeen?` · seit ${st.firstSeen}`:"");
       btn.innerHTML=`${esc(st.name)}<div class="meta">ID ${esc(st.id)}${esc(dist)}</div>`;
       btn.onclick=()=>{
         addViaStation(st, {pan:true});

@@ -189,7 +189,7 @@
     if (specKey === "vehEdge") return S.vehs.has(vehId(row)) || S.edges.has(ek);
     if (specKey === "lineEdge") return S.lines.has(row.line) || S.edges.has(ek);
     if (specKey === "locEdge") return S.locs.has(row.locClass) || S.edges.has(ek);
-    if (specKey === "stationLine") return S.stationsUsed.has(row.station) || S.stationsThrough.has(row.station) || S.stationsPassed.has(row.station) || S.lines.has(row.line);
+    if (specKey === "stationLine") return S.stationsUsed.has(row.station) || S.stationsThrough.has(row.station) || S.lines.has(row.line);
     if (specKey === "vehEdgeLine") return S.vehs.has(vehId(row)) || S.edges.has(ek) || S.lines.has(row.line)
       || S.vehLine.has(vehId(row) + "\0" + row.line)
       || S.vehEdge.has(vehId(row) + "\0" + row.from + "\0" + row.to)

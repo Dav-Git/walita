@@ -14,6 +14,7 @@ import download_statuses as dl
 import edge_patches as ep
 import home_region as hr
 import line_color_patches as lcp
+import line_patches as lp
 import loc_class_families as lcf
 import operator_line_patches as olp
 import operator_replacements as orp
@@ -395,6 +396,135 @@ class LineRulesPage(TablePage):
         drop = {int(i) for i in iids}
         self._store([r for i, r in enumerate(self.doc["rules"]) if i not in drop],
                     f"{len(drop)} Regel(n) gelöscht.")
+
+
+class LinesPage(TablePage):
+    """Linien aus den Fahrten (nach Override), Merges und Tag-Übertragung."""
+
+    can_add = False
+
+    def __init__(self, parent, ctx):
+        super().__init__(
+            parent, ctx, "Linien", ctx.paths["lines"],
+            "wirkt beim nächsten Dashboard-Bau; Tags beim Speichern",
+            ("line", "operator", "count", "target"),
+            {"line": "Linie", "operator": "Betreiber", "count": "Fahrten",
+             "target": "Zusammengeführt in"},
+            widths={"line": 110, "operator": 240, "count": 70, "target": 280})
+        self.patches = lp.empty_patches()
+
+    @staticmethod
+    def iid_of(key):
+        return json.dumps(list(key), ensure_ascii=False)
+
+    @staticmethod
+    def key_of(iid):
+        line, op = json.loads(iid)
+        return line, op
+
+    def load(self):
+        self.patches = lp.load_patches(self.path)
+
+    def _counts(self):
+        return lp.line_counts(self.ctx.statuses, self.patches)
+
+    def rows(self):
+        counts = self._counts()
+        aliases = lp.alias_map(self.patches)
+        keys = set(counts) | set(self.patches["merges"])
+        out = []
+        for key in sorted(keys):
+            dest = aliases.get(key)
+            target = "→ " + " · ".join(p for p in dest if p) if dest else ""
+            out.append((self.iid_of(key), (key[0], key[1], counts.get(key, 0), target),
+                        ("orphan",) if dest else ()))
+        return out
+
+    def orphans(self):
+        counts = self._counts()
+        return {self.iid_of(k) for k in self.patches["merges"] if not counts.get(k)}
+
+    def _store(self, msg):
+        if not lp.save_patches(self.path, self.patches):
+            self.save_failed()
+            return False
+        self._changed(msg)
+        return True
+
+    def merge_keys(self, keys, dest):
+        """Führt `keys` in `dest` zusammen; Ziel selbst verliert seinen Merge.
+
+        Ergäbe das einen Zyklus, bleibt die Datei unverändert (False).
+        """
+        trial = dict(self.patches, merges=dict(self.patches["merges"]))
+        for k in keys:
+            if k == dest:
+                lp.clear_merge(trial, dest)
+            else:
+                lp.set_merge(trial, k, dest)
+        aliases = lp.alias_map(trial)
+        if any(k != dest and k not in aliases for k in keys):
+            self.ctx.set_status(
+                f"Nicht zusammengeführt: {dest[0]} · {dest[1]} ergäbe einen Kreis.")
+            return False
+        self.patches = trial
+        n = sum(1 for k in keys if k != dest)
+        return self._store(f"{n} Linie(n) in {dest[0]} · {dest[1]} zusammengeführt.")
+
+    def _merge_selected(self):
+        sel = list(self.tree.selection())
+        if not sel or self.read_only:
+            return
+        keys = [self.key_of(i) for i in sel]
+        dlg = FieldsDialog(self, "Zusammenführen", [
+            ("Ziel-Linie", keys[0][0], sorted({k[0] for k in keys}, key=str.casefold)),
+            ("Ziel-Betreiber", keys[0][1], sorted({k[1] for k in keys}, key=str.casefold)),
+        ])
+        if dlg.result:
+            self.merge_keys(keys, (dlg.result[0], dlg.result[1]))
+
+    def edit(self, iid):
+        key = self.key_of(iid)
+        dest = self.patches["merges"].get(key) or key
+        dlg = FieldsDialog(self, "Zusammenführen", [
+            ("Ziel-Linie", dest[0], []), ("Ziel-Betreiber", dest[1], []),
+        ])
+        if dlg.result:
+            self.merge_keys([key], (dlg.result[0], dlg.result[1]))
+
+    def delete(self, iids):
+        """Löst Merges; gespiegelte Tags mit dem alten Ziel werden entfernt."""
+        aliases = lp.alias_map(self.patches)
+        n_tags = 0
+        for iid in iids:
+            key = self.key_of(iid)
+            dest = aliases.get(key)
+            lp.clear_merge(self.patches, key)
+            if dest:
+                for sid in self.ctx.clear_line_tags(key, dest[0]):
+                    lp.mark_cleared(self.patches, sid)
+                    n_tags += 1
+        msg = f"{len(iids)} Merge(s) gelöst."
+        if n_tags:
+            msg += f" walita:line auf {n_tags} Fahrt(en) zum Löschen vorgemerkt."
+        self._store(msg)
+
+    def stage_tags(self, iids):
+        n = sum(self.ctx.stage_line_tags(self.key_of(i)) for i in iids
+                if self.key_of(i) in self.patches["merges"])
+        self.ctx.set_status(f"walita:line auf {n} Fahrt(en) vorgemerkt – Speichern lädt hoch.")
+        return n
+
+    def extra_buttons(self, frame):
+        self._btn(frame, "Zusammenführen …", self._merge_selected)
+        self._btn(frame, "Als Tag auf Fahrten übertragen",
+                  lambda: self.stage_tags(list(self.tree.selection())))
+        self._btn(frame, "Fahrten zeigen", self._show_trips)
+
+    def _show_trips(self):
+        sel = self.tree.selection()
+        if sel:
+            self.ctx.filter_trips(self.key_of(sel[0]))
 
 
 def _tag(status, key):
@@ -1488,6 +1618,7 @@ class StationsPage(_GroupedPage):
 
 NAV_GROUPS = (
     ("FAHRZEUGE", (("roster", "Fuhrpark"), ("families", "Baureihenfamilien"))),
+    ("LINIEN", (("lines", "Verwaltung"),)),
     ("BETREIBER", (
         ("home", "Heimatregion"), ("replacements", "Namen"), ("line_rules", "Je Linie"),
     )),
@@ -1501,6 +1632,7 @@ PAGES = {
     "home": HomeRegionPage,
     "replacements": ReplacementsPage,
     "line_rules": LineRulesPage,
+    "lines": LinesPage,
     "edges": EdgesPage,
     "stations": StationsPage,
     "colors": ColorsPage,

@@ -40,6 +40,7 @@ import download_statuses as dl
 import edge_patches as ep
 import editor_settings as es
 import line_color_patches as lcp
+import line_patches as lp
 import vehicle_roster as vr
 import station_patches as sp
 from version import __version__
@@ -51,6 +52,9 @@ KEY_LOC = "trwl:locomotive_class"
 KEY_VEH = "trwl:vehicle_number"
 TABLE_TAG_KEYS = (KEY_LOC, KEY_VEH)
 TABLE_TAG_SET = frozenset(TABLE_TAG_KEYS)
+KEY_LINE = lp.KEY_LINE
+# Tags mit eigener Bedienung; erscheinen nicht in der freien Tag-Liste.
+MANAGED_TAG_SET = TABLE_TAG_SET | {KEY_LINE}
 
 TRIP_COLS = ("date", "line", "route", "operator", "loc", "veh", "marks")
 TRIP_HEADINGS = {
@@ -61,6 +65,8 @@ COL_WIDTHS = {
     "date": 140, "line": 70, "route": 300, "operator": 170,
     "loc": 170, "veh": 110, "marks": 50,
 }
+# Mindestbreite je Seite der Fahrten-Seite (Liste | Details) in px.
+TRIP_PANE_MIN = 360
 EDIT_COLS = ("loc", "veh")
 COL_TO_KEY = {"loc": KEY_LOC, "veh": KEY_VEH}
 EDGE_KIND_LABEL = {"override": "Fahrt", "default": "Standard", "": "—"}
@@ -316,6 +322,34 @@ def set_table_tag(status, key, value):
     status["tags"] = tags
 
 
+def apply_line_reconcile(patches, statuses, result, choices):
+    """Wendet einen Abgleich an: übernehmen, vormerken, Konflikte nach Wahl.
+
+    Gibt (Einträge in der Datei, vorgemerkte Tags) zurück.
+    """
+    by_id = {s.get("id"): s for s in statuses if isinstance(s, dict)}
+    n_file = n_tag = 0
+    for sid, tag in sorted(result["adopt"].items(), key=lambda kv: str(kv[0])):
+        lp.set_override(patches, sid, tag)
+        n_file += 1
+    for sid, line in sorted(result["stage"].items(), key=lambda kv: str(kv[0])):
+        if sid in by_id:
+            set_table_tag(by_id[sid], KEY_LINE, line)
+            n_tag += 1
+    for sid in result.get("uncleared") or ():
+        patches.get("cleared", set()).discard(sid)
+        n_file += 1
+    for sid, _hafas, local, tag in result["conflicts"]:
+        choice = (choices or {}).get(sid, "later")
+        if choice == "remote":
+            lp.set_override(patches, sid, tag)
+            n_file += 1
+        elif choice == "local" and sid in by_id:
+            set_table_tag(by_id[sid], KEY_LINE, local)
+            n_tag += 1
+    return n_file, n_tag
+
+
 def _snapshot_status(status):
     return (status.get("body") or "", _tags_tuple(status.get("tags") or []))
 
@@ -434,13 +468,15 @@ def roster_hint(roster, loc_class, number_text):
     return " · ".join(parts) or "✓ im Fuhrpark"
 
 
-def patch_markers(status, boarding, colors, edges):
+def patch_markers(status, boarding, colors, edges, lines=None):
     sid = (status or {}).get("id")
     out = ""
     if sid in ((boarding or {}).get("overrides") or {}):
         out += "E"
     if sid in ((colors or {}).get("overrides") or {}):
         out += "F"
+    if lines is not None and lp.effective_line(status, lines)[2]:
+        out += "L"
     shown = bp.preview_status(status, boarding)
     for a, b in ep.consecutive_pairs(dl.traveled_stopovers(shown)):
         if ep.patch_kind(edges, sid, a.get("id"), b.get("id")):
@@ -732,11 +768,11 @@ class TagDialog(tk.Toplevel):
 
         keys = [
             k for k in TAG_KEY_SUGGESTIONS
-            if k not in TABLE_TAG_SET and _dubi_kind({"key": k, "value": ""}) is None
+            if k not in MANAGED_TAG_SET and _dubi_kind({"key": k, "value": ""}) is None
         ]
         for k in extra_keys or ():
             if (
-                k and k not in keys and k not in TABLE_TAG_SET
+                k and k not in keys and k not in MANAGED_TAG_SET
                 and _dubi_kind({"key": k, "value": ""}) is None
             ):
                 keys.append(k)
@@ -787,10 +823,11 @@ class TagDialog(tk.Toplevel):
         if not key:
             messagebox.showerror("Tag", "Schlüssel darf nicht leer sein.", parent=self)
             return
-        if key in TABLE_TAG_SET:
+        if key in MANAGED_TAG_SET:
             messagebox.showerror(
                 "Tag",
-                "Baureihe und Fahrzeugnummer in der Tabelle links bearbeiten.",
+                "Baureihe und Fahrzeugnummer in der Tabelle links, "
+                "die Linie im Bereich Darstellung bearbeiten.",
                 parent=self,
             )
             return
@@ -807,6 +844,65 @@ class TagDialog(tk.Toplevel):
 
     def _cancel(self):
         self.result = None
+        self.destroy()
+
+
+class LineConflictDialog(tk.Toplevel):
+    """Konflikte Datei ↔ walita:line; result = {sid: local|remote|later} oder None."""
+
+    CHOICES = (("local", "Lokal behalten"), ("remote", "Träwelling übernehmen"),
+               ("later", "Später"))
+
+    def __init__(self, master, conflicts, dates=None):
+        super().__init__(master)
+        self.title("Linie: lokal und Träwelling verschieden")
+        self.transient(master)
+        self.result = None
+        frame = ttk.Frame(self, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Für diese Fahrten weicht der Tag walita:line von der "
+                              "lokalen Linie ab.", wraplength=620).pack(anchor="w")
+        cols = ("date", "hafas", "local", "remote", "choice")
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", height=12)
+        for c, text, w in (("date", "Datum", 110), ("hafas", "HAFAS", 90),
+                           ("local", "Lokal", 110), ("remote", "Träwelling", 110),
+                           ("choice", "Aktion", 170)):
+            self.tree.heading(c, text=text)
+            self.tree.column(c, width=w)
+        self.tree.pack(fill="both", expand=True, pady=8)
+        self.choice = {}
+        for sid, hafas, local, remote in conflicts:
+            self.choice[sid] = "later"
+            self.tree.insert("", "end", iid=str(sid), values=(
+                (dates or {}).get(sid, ""), hafas, local, remote, "Später"))
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+        for key, label in self.CHOICES:
+            ttk.Button(row, text=label + " (Auswahl)",
+                       command=lambda k=key: self._set(k, False)).pack(side="left", padx=(0, 6))
+        row2 = ttk.Frame(frame)
+        row2.pack(fill="x", pady=(6, 0))
+        for key, label in self.CHOICES:
+            ttk.Button(row2, text=label + " (alle)",
+                       command=lambda k=key: self._set(k, True)).pack(side="left", padx=(0, 6))
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Abbrechen", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=6)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.grab_set()
+        self.wait_window(self)
+
+    def _set(self, key, all_rows):
+        label = dict(self.CHOICES)[key]
+        iids = self.tree.get_children() if all_rows else self.tree.selection()
+        by_iid = {str(sid): sid for sid in self.choice}
+        for iid in iids:
+            self.choice[by_iid[iid]] = key
+            self.tree.set(iid, "choice", label)
+
+    def _ok(self):
+        self.result = dict(self.choice)
         self.destroy()
 
 
@@ -1031,7 +1127,8 @@ class EditorApp:
                  vehicle_roster_path="data/vehicle_roster.json",
                  operator_line_patches_path="data/operator_line_patches.json",
                  operator_replacements_path="data/operator_replacements.json",
-                 ui_state_path="data/editor_state.json"):
+                 ui_state_path="data/editor_state.json",
+                 line_patches_path="data/line_patches.json"):
         self.root = root
         self.token = token
         self.username = username
@@ -1055,6 +1152,9 @@ class EditorApp:
         self.station_patches = sp.load_patches(station_patches_path)
         self.line_color_patches = lcp.load_patches(line_color_patches_path)
         self.boarding_patches = bp.load_patches(boarding_patches_path)
+        self.line_patches_path = line_patches_path
+        self._line_patches_ok = True
+        self.line_patches = self._read_line_patches()
         self._patch_server = None
         self._station_server = None
         self.limit = limit
@@ -1072,6 +1172,7 @@ class EditorApp:
         self._edit_closing = False
         self._baseline = {}
         self._xfer = None
+        self._line_key_filter = None
         # (Spalte, absteigend), Index 0 = primär
         self._sort_keys = [(c, d) for c, d in self.ui_state["sort"]]
         self._reset_baselines()
@@ -1093,6 +1194,49 @@ class EditorApp:
             if os.path.isfile(statuses_path) else " von der API"
         )
         self._set_status(f"{len(self.statuses)} Fahrten geladen{src}.")
+        self.root.after_idle(self._reconcile_lines)
+
+    def _reconcile_lines(self, ask=True):
+        """Abgleich Datei ↔ walita:line nach dem Laden."""
+        self.line_patches = self._read_line_patches()
+        if not self._line_patches_ok or es.check_config_file(self.line_patches_path):
+            self._set_status("line_patches.json ungültig – kein Abgleich mit walita:line.")
+            return
+        result = lp.reconcile(self.line_patches, self.statuses)
+        if not any(result.values()):
+            return
+        choices = {}
+        if result["conflicts"] and ask:
+            dates = {s.get("id"): _checkin_bits(s)["date"] for s in self.statuses}
+            dlg = LineConflictDialog(self.root, result["conflicts"], dates)
+            choices = dlg.result or {}
+        n_file, n_tag = apply_line_reconcile(
+            self.line_patches, self.statuses, result, choices)
+        if n_file and not lp.save_patches(self.line_patches_path, self.line_patches):
+            messagebox.showerror(
+                "Linie", "line_patches.json nicht schreibbar.", parent=self.root)
+            return
+        self._reload_visible_page("settings:lines")
+        self._apply_filter()
+        self._refresh_nav_counts()
+        if self.current is not None:
+            self._load_status(self.current)
+        open_n = sum(1 for c in result["conflicts"]
+                     if choices.get(c[0], "later") == "later")
+        msg = f"Linien abgeglichen: {n_file} aus Tags übernommen, {n_tag} Tags vorgemerkt"
+        if open_n:
+            msg += f", {open_n} Konflikte offen"
+        self._set_status(msg + ".")
+
+    def _read_line_patches(self):
+        """Linien-Patches; ungültige Datei → leer, Schreiben und Abgleich gesperrt."""
+        try:
+            patches = lp.load_patches(self.line_patches_path)
+        except ValueError:
+            self._line_patches_ok = False
+            return lp.empty_patches()
+        self._line_patches_ok = True
+        return patches
 
     def _reset_baselines(self):
         self._baseline = {
@@ -1239,7 +1383,13 @@ class EditorApp:
         else:
             self.settings_pages[page].reload()
 
+    def _on_search_changed(self):
+        if self.filter_var.get():
+            self._line_key_filter = None
+        self._apply_filter()
+
     def _set_trip_view(self, key):
+        self._line_key_filter = None
         for var in self.filter_flags.values():
             var.set(False)
         if key == "trips:noloc":
@@ -1270,12 +1420,30 @@ class EditorApp:
         save_ui_state(self.ui_state_path, self.ui_state)
 
     def _restore_sash(self):
-        sash = self.ui_state.get("sash")
-        if sash:
-            try:
-                self.trips_panes.sashpos(0, sash)
-            except tk.TclError:
-                pass
+        """Gespeicherte Aufteilung, sonst 60 % Liste; erst wenn die Breite steht."""
+        try:
+            total = self.trips_panes.winfo_width()
+        except tk.TclError:
+            return
+        if total <= 1:
+            self.root.after(50, self._restore_sash)
+            return
+        sash = self.ui_state.get("sash") or int(total * 0.6)
+        self._clamp_sash(sash)
+
+    def _clamp_sash(self, want=None):
+        """Hält Liste und Details sichtbar: jede Seite mindestens TRIP_PANE_MIN px."""
+        try:
+            total = self.trips_panes.winfo_width()
+            if total <= 1:
+                return
+            pos = self.trips_panes.sashpos(0) if want is None else int(want)
+            lo = min(TRIP_PANE_MIN, total // 2)
+            new = max(lo, min(total - lo, pos))
+            if new != self.trips_panes.sashpos(0):
+                self.trips_panes.sashpos(0, new)
+        except tk.TclError:
+            pass
 
     def _build_trips_page(self, parent):
         self.trips_panes = ttk.Panedwindow(parent, orient="horizontal")
@@ -1287,6 +1455,9 @@ class EditorApp:
         self._build_trip_list(left)
         self._build_detail(right_outer)
         self._sash_restored = False
+        clamp = lambda _e: self.root.after_idle(self._clamp_sash)
+        self.trips_panes.bind("<Configure>", clamp, add="+")
+        self.trips_panes.bind("<ButtonRelease-1>", clamp, add="+")
 
     def _build_trip_list(self, left):
         filt = ttk.Frame(left)
@@ -1295,7 +1466,7 @@ class EditorApp:
         row1.pack(fill="x")
         ttk.Label(row1, text="Suche").pack(side="left")
         self.filter_var = tk.StringVar()
-        _on_filter = lambda *_: self._apply_filter()
+        _on_filter = lambda *_: self._on_search_changed()
         if hasattr(self.filter_var, "trace_add"):
             self.filter_var.trace_add("write", _on_filter)
         else:
@@ -1529,6 +1700,24 @@ class EditorApp:
         self._refresh_boarding()
 
     def _build_display_group(self, parent):
+        line_row = ttk.Frame(parent)
+        line_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(line_row, text="Linie").pack(side="left")
+        self.line_var = tk.StringVar(value="")
+        self.line_entry = ttk.Entry(line_row, textvariable=self.line_var, width=16)
+        self.line_entry.pack(side="left", padx=(8, 6))
+        self.line_entry.bind("<Return>", lambda _e: self._set_line(self.line_var.get()))
+        self._line_src_var = tk.StringVar(value="")
+        ttk.Label(line_row, textvariable=self._line_src_var,
+                  foreground="#666666").pack(side="left")
+        self.line_reset_btn = ttk.Button(
+            line_row, text="Zurücksetzen", command=lambda: self._set_line(""))
+        self.line_reset_btn.pack(side="right")
+        self.line_apply_btn = ttk.Button(
+            line_row, text="Übernehmen",
+            command=lambda: self._set_line(self.line_var.get()))
+        self.line_apply_btn.pack(side="right", padx=(0, 6))
+        self._refresh_line_field()
         color_row = ttk.Frame(parent)
         color_row.pack(fill="x")
         ttk.Label(color_row, text="Linienfarbe").pack(side="left")
@@ -1667,6 +1856,7 @@ class EditorApp:
                 "boarding": self.boarding_patches_path,
                 "edges": self.edge_patches_path,
                 "stations": self.station_patches_path,
+                "lines": self.line_patches_path,
             },
             goto_status=self._goto_status,
             open_edge_map=self._open_edge_map_for,
@@ -1675,12 +1865,60 @@ class EditorApp:
             set_status=self._set_status,
             pick_color=self._ask_line_color,
             pick_boarding=self._ask_boarding,
+            stage_line_tags=self._stage_line_tags,
+            filter_trips=self._filter_trips,
+            clear_line_tags=self._clear_line_tags,
         )
         self.settings_pages = {}
         for key, cls in es.PAGES.items():
             page = cls(self.content, self.settings_ctx)
             self.pages[key] = page
             self.settings_pages[key] = page
+
+    def _stage_line_tags(self, src_key):
+        """walita:line = effektiver Name für alle Fahrten einer gemergten Linie."""
+        self._flush_detail()
+        n = 0
+        for s in self.statuses:
+            if lp.source_key(s, self.line_patches) != tuple(src_key):
+                continue
+            eff = lp.effective_line(s, self.line_patches, use_tag=False)[0]
+            set_table_tag(s, KEY_LINE, eff)
+            n += 1
+        self._apply_filter()
+        self._refresh_nav_counts()
+        if self.current is not None:
+            self._load_status(self.current)
+        return n
+
+    def _filter_trips(self, key):
+        """Fahrtenliste exakt auf einen Linien-Schlüssel (nach Override, vor Merge)."""
+        self._show_page("trips:all")
+        self.period_var.set(self._period_opts[0][1])
+        self.operator_var.set("Alle")
+        self.filter_var.set("")
+        self._line_key_filter = tuple(key)
+        self._apply_filter()
+
+    def _clear_line_tags(self, src_key, line):
+        """Entfernt walita:line = `line` von den Fahrten eines Linien-Schlüssels.
+
+        Gibt die IDs zurück, deren Tag vorgemerkt gelöscht wurde.
+        """
+        self._flush_detail()
+        sids = []
+        for s in self.statuses:
+            if lp.source_key(s, self.line_patches) != tuple(src_key):
+                continue
+            if lp.tag_line(s) != line:
+                continue
+            set_table_tag(s, KEY_LINE, "")
+            sids.append(s.get("id"))
+        self._apply_filter()
+        self._refresh_nav_counts()
+        if self.current is not None:
+            self._load_status(self.current)
+        return sids
 
     def _goto_status(self, sid):
         self.filter_var.set("")
@@ -1699,6 +1937,7 @@ class EditorApp:
         self.station_patches = sp.load_patches(self.station_patches_path)
         self.line_color_patches = lcp.load_patches(self.line_color_patches_path)
         self.boarding_patches = bp.load_patches(self.boarding_patches_path)
+        self.line_patches = self._read_line_patches()
         self.roster = vr.load_roster(self.vehicle_roster_path)
         self._apply_filter()
         if self.current is not None:
@@ -1801,8 +2040,12 @@ class EditorApp:
         today = datetime.date.today()
         flags = {k: v.get() for k, v in self.filter_flags.items()}
 
+        line_key = self._line_key_filter
+
         def keep(s):
             if q and not self._matches_filter(s, q):
+                return False
+            if line_key and lp.source_key(s, self.line_patches) != line_key:
                 return False
             if not in_period(s, period_key, today):
                 return False
@@ -1813,7 +2056,8 @@ class EditorApp:
             if flags["noveh"] and has_tag(s, KEY_VEH):
                 return False
             if flags["patched"] and not patch_markers(
-                s, self.boarding_patches, self.line_color_patches, self.patches
+                s, self.boarding_patches, self.line_color_patches, self.patches,
+                self.line_patches,
             ):
                 return False
             if flags["dirty"] and not self._status_dirty(s):
@@ -1855,8 +2099,10 @@ class EditorApp:
 
     def _update_footer(self):
         n_dirty = sum(1 for s in self.filtered if self._status_dirty(s))
+        key = self._line_key_filter
         self.footer_var.set(
             f"{len(self.filtered)} Fahrten"
+            + (f" · Linie {key[0]} · {key[1]}" if key else "")
             + (f" · {n_dirty} ungespeichert" if n_dirty else "")
         )
 
@@ -1871,7 +2117,8 @@ class EditorApp:
             operator_of(status) or NO_OPERATOR_LABEL,
             _tag_value(shown, KEY_LOC), _tag_value(shown, KEY_VEH),
             patch_markers(
-                status, self.boarding_patches, self.line_color_patches, self.patches
+                status, self.boarding_patches, self.line_color_patches, self.patches,
+                self.line_patches,
             ),
         )
 
@@ -1946,12 +2193,12 @@ class EditorApp:
         seen = set()
         for t in self.current.get("tags") or []:
             n = _norm_tag(t)
-            if n["key"] in TABLE_TAG_SET and n["key"] not in seen:
+            if n["key"] in MANAGED_TAG_SET and n["key"] not in seen:
                 pieces.append(n)
                 seen.add(n["key"])
         for t in self._tag_rows:
             n = _norm_tag(t)
-            if n["key"] and n["key"] not in TABLE_TAG_SET and n["key"] not in seen:
+            if n["key"] and n["key"] not in MANAGED_TAG_SET and n["key"] not in seen:
                 pieces.append(n)
                 seen.add(n["key"])
         original = self._original_tags.get(self.current.get("id")) or []
@@ -1982,6 +2229,7 @@ class EditorApp:
         self._refresh_extra_tree()
         self._refresh_edges()
         self._refresh_line_color()
+        self._refresh_line_field()
         self._refresh_boarding()
         self._sync_dubi_buttons()
 
@@ -2014,21 +2262,27 @@ class EditorApp:
         self._update_body_count()
         self._tag_rows = [
             _norm_tag(t) for t in (status.get("tags") or [])
-            if _norm_tag(t)["key"] and _norm_tag(t)["key"] not in TABLE_TAG_SET
+            if _norm_tag(t)["key"] and _norm_tag(t)["key"] not in MANAGED_TAG_SET
         ]
         self._show_dubi_checks()
         self._refresh_extra_tree()
         self._sync_dubi_buttons()
         self._refresh_edges()
         self._refresh_line_color()
+        self._refresh_line_field()
         self._refresh_boarding()
         self._refresh_vehicle_fields()
 
     def _shown(self, status):
-        """Anzeige-Kopie mit lokalem Einstieg. Ohne Patch dasselbe Objekt."""
+        """Anzeige-Kopie mit lokalem Einstieg und effektiver Linie.
+
+        Ohne Patch dasselbe Objekt.
+        """
         if status is None:
             return None
-        return bp.preview_status(status, self.boarding_patches)
+        return lp.preview_status(
+            bp.preview_status(status, self.boarding_patches), self.line_patches
+        )
 
     def _matches_filter(self, status, query):
         blob = _search_blob(self._shown(status))
@@ -2110,7 +2364,7 @@ class EditorApp:
 
         def add(k):
             if (
-                k and k not in seen and k not in TABLE_TAG_SET
+                k and k not in seen and k not in MANAGED_TAG_SET
                 and _dubi_kind({"key": k, "value": ""}) is None
             ):
                 extra.append(k)
@@ -2170,6 +2424,53 @@ class EditorApp:
         del self._tag_rows[idx]
         self._refresh_extra_tree()
         self._flush_detail()
+
+    LINE_SOURCE_LABEL = {"override": "lokal", "merge": "Merge", "tag": "Tag", "": "HAFAS"}
+
+    def _refresh_line_field(self):
+        if not hasattr(self, "line_apply_btn"):
+            return
+        has = self.current is not None
+        if not has:
+            self.line_var.set("")
+            self._line_src_var.set("")
+        else:
+            line, _op, source = lp.effective_line(self.current, self.line_patches)
+            self.line_var.set(line)
+            self._line_src_var.set(self.LINE_SOURCE_LABEL[source])
+        state = "normal" if has else "disabled"
+        self.line_apply_btn.configure(state=state)
+        self.line_reset_btn.configure(state=state)
+
+    def _set_line(self, name):
+        """Override für die aktuelle Fahrt; leer oder HAFAS-Name entfernt ihn."""
+        if self.current is None or not self._config_ok(self.line_patches_path, "Linie"):
+            return
+        # Frisch lesen: war die Datei beim Start ungültig, ist der Speicher leer.
+        self.line_patches = self._read_line_patches()
+        name = (name or "").strip()
+        sid = self.current.get("id")
+        hafas = lp.line_and_operator(self.current)[0]
+        if name and name != hafas:
+            lp.set_override(self.line_patches, sid, name)
+        else:
+            lp.clear_override(self.line_patches, sid)
+            # Ein schon hochgeladener Tag darf beim Zurücklesen nicht wieder
+            # als Override zählen, solange er bei Träwelling noch steht.
+            lp.mark_cleared(self.line_patches, sid)
+        if not lp.save_patches(self.line_patches_path, self.line_patches):
+            messagebox.showerror(
+                "Linie", "line_patches.json nicht schreibbar.", parent=self.root)
+            return
+        line, _op, source = lp.effective_line(
+            self.current, self.line_patches, use_tag=False)
+        set_table_tag(self.current, KEY_LINE, line if source == "override" else "")
+        self._apply_meta(self.current)
+        self._refresh_line_field()
+        self._refresh_trip_row(self.current)
+        self._refresh_nav_counts()
+        self._update_footer()
+        self._set_status("Linie gespeichert (lokal); Tag beim nächsten Speichern.")
 
     def _refresh_line_color(self):
         if not hasattr(self, "_color_swatch"):
@@ -2532,6 +2833,7 @@ class EditorApp:
             served_ids=served,
             stations=stations,
             patches=self.patches,
+            first_seen=ep.first_seen_dates(self.statuses),
         )
         webbrowser.open(
             "%s?from=%s&to=%s&t=%s" % (
@@ -2744,6 +3046,7 @@ class EditorApp:
         if page.startswith("settings:"):
             self._reload_visible_page(page)
         self._set_status(f"{len(statuses)} Fahrten von der API geladen.")
+        self._reconcile_lines()
 
     def _dirty_statuses(self):
         self._commit_edit()
@@ -2901,6 +3204,7 @@ class EditorApp:
             "--boarding-patches", self.boarding_patches_path,
             "--vehicle-roster", self.vehicle_roster_path,
             "--operator-line-patches", self.operator_line_patches_path,
+            "--line-patches", self.line_patches_path,
         ]
         if self.ignore_plus:
             argv.append("--ignore-plus")
@@ -3035,6 +3339,10 @@ def parse_args(argv=None):
         help="Operator einer Linie überschreiben (Default: data/operator_line_patches.json).",
     )
     parser.add_argument(
+        "--line-patches", default="data/line_patches.json",
+        help="Liniennamen je Fahrt und Merges (Default: data/line_patches.json).",
+    )
+    parser.add_argument(
         "--operator-replacements", default="data/operator_replacements.json",
         help="Betreibernamen Rohname → kanonisch (Default: data/operator_replacements.json).",
     )
@@ -3121,6 +3429,7 @@ def main(argv=None):
         vehicle_roster_path=args.vehicle_roster,
         operator_line_patches_path=args.operator_line_patches,
         operator_replacements_path=args.operator_replacements,
+        line_patches_path=args.line_patches,
     )
     root.mainloop()
     return 0

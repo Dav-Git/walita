@@ -271,6 +271,64 @@ def station_map_row(stations, sid, from_id=None, to_id=None):
     return row
 
 
+def _status_day(status):
+    """'YYYY-MM-DD' der Abfahrt am Einstieg (wie `status_date` im Export)."""
+    checkin = status.get("checkin") or {}
+    origin = checkin.get("origin") or {}
+    ts = (
+        origin.get("departure")
+        or origin.get("departurePlanned")
+        or status.get("createdAt")
+    )
+    return ts[:10] if isinstance(ts, str) and len(ts) >= 10 else None
+
+
+def first_seen_dates(statuses):
+    """{station_id: 'YYYY-MM-DD'} der frühesten Fahrt, die die ID enthält.
+
+    Zählt Ein-/Ausstieg und alle Stopover des Trips (auch außerhalb des
+    Check-in-Abschnitts), jeweils samt verschachteltem `station`-Objekt.
+    Ohne Station-Merges: jede ID behält ihr eigenes Datum.
+    """
+    out = {}
+
+    def note(obj, day):
+        if not isinstance(obj, dict):
+            return
+        for raw in (obj.get("id"), (obj.get("station") or {}).get("id")
+                    if isinstance(obj.get("station"), dict) else None):
+            sid = station_id(raw)
+            if sid is None:
+                continue
+            prev = out.get(sid)
+            if prev is None or day < prev:
+                out[sid] = day
+
+    for status in statuses or []:
+        if not isinstance(status, dict):
+            continue
+        day = _status_day(status)
+        if day is None:
+            continue
+        checkin = status.get("checkin") or {}
+        note(checkin.get("origin"), day)
+        note(checkin.get("destination"), day)
+        trip = status.get("trip")
+        if isinstance(trip, dict):
+            for stop in trip.get("stopovers") or []:
+                note(stop, day)
+    return out
+
+
+def add_first_seen(rows, first_seen):
+    """Setzt `firstSeen` an Kartenzeilen mit bekanntem Datum (in place)."""
+    for row in rows:
+        day = (first_seen or {}).get(station_id(row.get("id")))
+        if day:
+            row["firstSeen"] = day
+    return rows
+
+
 def corridor_stations(stations, from_id, to_id, radius_km=CORRIDOR_KM):
     """Stationen mit Koordinaten im Korridor um A–B, ohne A/B selbst."""
     a, b = station_id(from_id), station_id(to_id)
@@ -428,6 +486,7 @@ class PatchMapService:
         self.from_name = ""
         self.to_name = ""
         self.served_ids = []
+        self.first_seen = {}
         self._httpd = None
         self._thread = None
         self._lock = threading.Lock()
@@ -450,7 +509,7 @@ class PatchMapService:
         return True
 
     def set_edge(self, *, status_id, from_id, to_id, from_name, to_name,
-                 served_ids, stations, patches):
+                 served_ids, stations, patches, first_seen=None):
         with self._lock:
             self.status_id = station_id(status_id)
             self.from_id = station_id(from_id)
@@ -460,6 +519,7 @@ class PatchMapService:
             self.served_ids = [station_id(s) for s in (served_ids or [])]
             self.stations = stations or {}
             self.patches = patches or empty_patches()
+            self.first_seen = first_seen or {}
 
     def context_payload(self):
         with self._lock:
@@ -469,6 +529,7 @@ class PatchMapService:
             a, b = self.from_id, self.to_id
             from_name, to_name = self.from_name, self.to_name
             served = list(self.served_ids)
+            first_seen = self.first_seen
         ca = station_coords(stations, a)
         cb = station_coords(stations, b)
         kind = patch_kind(patches, sid, a, b)
@@ -489,6 +550,7 @@ class PatchMapService:
             if extra:
                 mapped.append(extra)
                 seen.add(vid)
+        add_first_seen(mapped, first_seen)
         return {
             "statusId": sid,
             "corridorKm": CORRIDOR_KM,
@@ -514,7 +576,8 @@ class PatchMapService:
         with self._lock:
             stations = self.stations
             a, b = self.from_id, self.to_id
-        return search_stations(stations, query, a, b)
+            first_seen = self.first_seen
+        return add_first_seen(search_stations(stations, query, a, b), first_seen)
 
     def apply_save(self, mode, via_raw):
         with self._lock:

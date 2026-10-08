@@ -169,6 +169,7 @@ neu eingeloggt.
 | `--home-region PFAD` | [Heimatregion](#heimatregion) (Default `data/home_region.json`) |
 | `--vehicle-roster PFAD` | [Fuhrpark](#fuhrpark) (Default `data/vehicle_roster.json`) |
 | `--operator-line-patches PFAD` | [Operator je Linie](#operator-je-linie) (Default `data/operator_line_patches.json`) |
+| `--line-patches PFAD` | [Linien-Patches](#linien-patches) (Default `data/line_patches.json`) |
 
 Die Pfade gelten auch für `--edit`; der Editor liest und schreibt dieselben Dateien.
 
@@ -374,6 +375,36 @@ ziehbar (sofort gespeichert). Zwei Stationen wählen, **Wird aufgelöst** /
 **Bleibt**, dann **Zusammenführen**. Listen in der Sidebar setzen Moves und
 Merges zurück. Weitere Stationen per Name oder ID suchen. Internet nur für Kacheln.
 
+Beide Karten haben das Feld **Entdeckt ab**. Es blendet Stationen aus, deren
+erste Fahrt (frühester Status, in dessen Trip die Stations-ID vorkommt) vor
+dem Datum liegt. So verschwinden alte Stammdatensätze, die Träwelling später
+durch neue IDs ersetzt hat. Sichtbar bleiben immer Start/Ziel, Via und Halte
+der Fahrt (Kantenkarte) bzw. Auswahl, Merge-Ziele, verschobene Stationen und
+Suchtreffer (Stationskarte). Das Datum steht in Popup und Suchliste; jede
+Karte merkt sich ihren Wert im Browser.
+
+### Linien-Patches
+
+Träwelling/HAFAS benennt Linien manchmal falsch oder uneinheitlich (`RE1`
+und `RE 1`). In `data/line_patches.json` (gitignored) lässt sich der Name
+**je Fahrt** setzen (Editor: Detailbereich *Darstellung → Linie*, Markierung
+**L** in der Fahrtenliste) und lassen sich Linien **zusammenführen** (Editor:
+*Linien → Verwaltung*; Ziel ist Name + Betreiber). Beim Dashboard-Bau gilt
+zuerst der Name je Fahrt, dann der Merge, danach *Betreiber → Je Linie*.
+
+Der Editor spiegelt den Namen je Fahrt als Tag `walita:line` nach Träwelling
+(beim **Speichern**); für Merges per **Als Tag auf Fahrten übertragen**. Beim
+Start und nach **Von API laden** liest er die Tags zurück: Fehlt lokal ein
+Eintrag, übernimmt er den Tag in die Datei; weicht er ab, fragt ein Dialog
+(lokal behalten, Träwelling übernehmen, später). Das Dashboard nutzt
+`walita:line` auch ohne Datei-Eintrag (durch Merges hindurch), die Datei hat
+aber Vorrang. Zurücksetzen einer Linie oder Lösen eines Merges merkt das
+Löschen des Tags vor; bis es gespeichert ist, ignorieren Dashboard und
+Abgleich den alten Tag (`cleared` in der Datei). **Fahrten zeigen** filtert
+exakt auf die Linie (Anzeige in der Fußzeile, Suche hebt den Filter auf).
+`statuses.json` bleibt unverändert. Ungültiges JSON in der Datei bricht den
+Bau ab; der Editor schreibt sie dann nicht und gleicht nicht ab.
+
 ### Linienfarben-Patches
 
 Träwelling liefert `checkin.routeColor` manchmal unvollständig oder abweichend von
@@ -511,7 +542,9 @@ benachbarten Zeilen mit Differenz ±1.
   das Fahrzeug ausgemustert ist und das Datum bekannt ist.
 - Die Abdeckung und die Leerzeilen gelten bei Gruppierung nach Baureihe.
   **Nicht benutzte ausblenden** nimmt Zeilen ohne Fahrt aus der Tabelle; die
-  Abdeckung im Kopf zählt sie weiter. Nach Produktkategorie bleiben nur
+  Abdeckung im Kopf zählt sie weiter. Eine Baureihe ohne gefahrenen Wagen im
+  aktuellen Filter (Betreiber, Kategorie, Zeitraum, Heimatregion) bekommt
+  keine Tabelle, auch wenn der Fuhrpark Nummern für sie listet. Nach Produktkategorie bleiben nur
   gefahrene Wagen; ausgemusterte davon trotzdem schwarz, der Goldrand
   überspringt sie.
 - Nach dem Speichern im Tag-Editor das Dashboard neu bauen.
@@ -628,8 +661,9 @@ zusammengefügt. Sieben Ansichten:
 
 - **Tagesziele** – Erstvorkommen und Wiederholungen an einem gewählten Tag
   (Linien, Fahrzeuge, Top-Wagen der Baureihe, Kanten, benutzte vs. gehaltene
-  vs. physisch durchfahrene Stationen und Kombis). ‹ und › springen zum
-  vorigen bzw. nächsten Tag mit Fahrten.
+  vs. physisch durchfahrene Stationen und Kombis). *Station × Linie* zählt
+  nur Ein-/Ausstiege und gehaltene Stationen, keine physischen Durchfahrten.
+  ‹ und › springen zum vorigen bzw. nächsten Tag mit Fahrten.
 
 Linien, Fahrten, Fahrzeuge und Tagesziele haben **Als TSV kopieren** für die
 gerade sichtbare Tabelle (zum Einfügen in eine Tabellenkalkulation).
@@ -647,6 +681,7 @@ python3 build_dashboard.py --boarding-patches data/boarding_patches.json --open
 python3 build_dashboard.py --home-region data/home_region.json --open
 python3 build_dashboard.py --vehicle-roster data/vehicle_roster.json --open
 python3 build_dashboard.py --operator-line-patches data/operator_line_patches.json --open
+python3 build_dashboard.py --line-patches data/line_patches.json --open
 ```
 
 ### Doppeltraktion
@@ -794,6 +829,28 @@ und Aussteigen; `trip.stopovers` enthält jeweils die komplette Route. Die Fahrz
 (`trwl:locomotive_class` / `trwl:vehicle_number`) sind plausibel erfunden, mit einer
 festen Flotte je Linie, damit sich Nummern wiederholen – inklusive einiger
 Doppeltraktionen für `--ignore-plus`.
+
+## Changelog
+
+### 1.1
+
+- **Linien-Patches:** Liniennamen je Fahrt überschreiben und Linien
+  zusammenführen (Editor: *Darstellung → Linie* und *Linien → Verwaltung*).
+  Gespiegelt als Tag `walita:line` nach Träwelling und beim Laden
+  zurückgelesen, mit Rückfrage bei Abweichungen. Siehe
+  [Linien-Patches](#linien-patches).
+- **Fahrzeuge:** Baureihen ohne gefahrenen Wagen im aktuellen Filter bekommen
+  keine leere Tabelle mehr, auch wenn der Fuhrpark Nummern für sie listet.
+- **Patch-Karten:** Feld *Entdeckt ab* blendet Stationen aus, die nur in
+  älteren Fahrten vorkommen, etwa alte Stammdatensätze.
+- **Tagesziele:** Physische Durchfahrten zählen nicht mehr als
+  *Station × Linie*.
+- **Tag-Editor:** Fahrtenliste und Details bleiben beim Öffnen immer beide
+  sichtbar.
+
+### 1.0
+
+- Erste Version.
 
 ## Lizenz
 

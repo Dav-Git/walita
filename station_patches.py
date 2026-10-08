@@ -17,6 +17,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from edge_patches import (
+    add_first_seen,
+    first_seen_dates,
     lookup_station,
     search_stations,
     station_id,
@@ -416,6 +418,7 @@ class StationMapService:
         self.statuses = []
         self.edge_patches = {"defaults": {}, "overrides": {}}
         self.patches = empty_patches()
+        self.first_seen = {}
         self._httpd = None
         self._thread = None
         self._lock = threading.Lock()
@@ -441,6 +444,7 @@ class StationMapService:
         with self._lock:
             self.stations = stations or {}
             self.statuses = list(statuses or [])
+            self.first_seen = first_seen_dates(self.statuses)
             self.edge_patches = edge_patches or {"defaults": {}, "overrides": {}}
             self.patches = patches or empty_patches()
 
@@ -456,6 +460,7 @@ class StationMapService:
     def context_payload(self, extra_ids=None):
         with self._lock:
             stations, statuses, edge_patches, patches, _path = self._snapshot()
+            first_seen = self.first_seen
         aliases = alias_map(patches)
         applied = apply_to_stations(patches, stations)
         used = collect_used_ids(statuses, edge_patches, patches)
@@ -474,6 +479,7 @@ class StationMapService:
                 continue
             row["moved"] = canon in (patches.get("moves") or {})
             mapped.append(row)
+        add_first_seen(mapped, first_seen)
         mapped.sort(key=lambda r: ((r.get("name") or ""), r["id"]))
         moves_out = []
         for sid, coords in sorted((patches.get("moves") or {}).items(), key=lambda kv: kv[0]):
@@ -504,6 +510,7 @@ class StationMapService:
     def search_payload(self, query):
         with self._lock:
             stations, _statuses, _edge, patches, _path = self._snapshot()
+            first_seen = self.first_seen
         aliases = alias_map(patches)
         applied = apply_to_stations(patches, stations)
         hits = search_stations(applied, query)
@@ -521,7 +528,7 @@ class StationMapService:
             row["moved"] = canon in (patches.get("moves") or {})
             out.append(row)
             seen.add(canon)
-        return out
+        return add_first_seen(out, first_seen)
 
     def _commit(self, patches):
         path = self.patches_path

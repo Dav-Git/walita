@@ -395,10 +395,12 @@
         row.recs.length||String(row.number).toLowerCase().includes(q));
       if(hideUnusedEl&&hideUnusedEl.checked)
         visible=visible.filter(row=>row.count>0);
-      if(!visible.length) return;
+      // Gruppen ohne gefahrenes Fahrzeug im aktuellen Filter entfallen ganz,
+      // auch wenn der Fuhrpark Nummern für die Baureihe listet.
+      const ridden=visible.filter(row=>row.count>0).length;
+      if(!ridden) return;
       visible.sort(rowCmp);
       markStreaks(visible);
-      const ridden=visible.filter(row=>row.count>0).length;
       totalVeh+=ridden;
       const groupKm=Math.round(recs.reduce((s,r)=>s+(r.distanceKm||0),0)*10)/10;
       const coverage=groupDim==="locClass"?coverageFor(gname, recs):null;

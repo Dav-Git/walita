@@ -283,12 +283,13 @@ def _status_day(status):
     return ts[:10] if isinstance(ts, str) and len(ts) >= 10 else None
 
 
-def first_seen_dates(statuses):
-    """{station_id: 'YYYY-MM-DD'} der frühesten Fahrt, die die ID enthält.
+def seen_dates(statuses):
+    """{station_id: ('YYYY-MM-DD', 'YYYY-MM-DD')} der frühesten und spätesten
+    Fahrt, die die ID enthält.
 
     Zählt Ein-/Ausstieg und alle Stopover des Trips (auch außerhalb des
     Check-in-Abschnitts), jeweils samt verschachteltem `station`-Objekt.
-    Ohne Station-Merges: jede ID behält ihr eigenes Datum.
+    Ohne Station-Merges: jede ID behält ihre eigenen Daten.
     """
     out = {}
 
@@ -301,8 +302,10 @@ def first_seen_dates(statuses):
             if sid is None:
                 continue
             prev = out.get(sid)
-            if prev is None or day < prev:
-                out[sid] = day
+            if prev is None:
+                out[sid] = (day, day)
+            else:
+                out[sid] = (min(prev[0], day), max(prev[1], day))
 
     for status in statuses or []:
         if not isinstance(status, dict):
@@ -320,12 +323,12 @@ def first_seen_dates(statuses):
     return out
 
 
-def add_first_seen(rows, first_seen):
-    """Setzt `firstSeen` an Kartenzeilen mit bekanntem Datum (in place)."""
+def add_seen(rows, seen):
+    """Setzt `firstSeen` / `lastSeen` an Kartenzeilen mit bekannten Daten (in place)."""
     for row in rows:
-        day = (first_seen or {}).get(station_id(row.get("id")))
-        if day:
-            row["firstSeen"] = day
+        days = (seen or {}).get(station_id(row.get("id")))
+        if days:
+            row["firstSeen"], row["lastSeen"] = days
     return rows
 
 
@@ -486,7 +489,7 @@ class PatchMapService:
         self.from_name = ""
         self.to_name = ""
         self.served_ids = []
-        self.first_seen = {}
+        self.seen_days = {}
         self._httpd = None
         self._thread = None
         self._lock = threading.Lock()
@@ -509,7 +512,7 @@ class PatchMapService:
         return True
 
     def set_edge(self, *, status_id, from_id, to_id, from_name, to_name,
-                 served_ids, stations, patches, first_seen=None):
+                 served_ids, stations, patches, seen_days=None):
         with self._lock:
             self.status_id = station_id(status_id)
             self.from_id = station_id(from_id)
@@ -519,7 +522,7 @@ class PatchMapService:
             self.served_ids = [station_id(s) for s in (served_ids or [])]
             self.stations = stations or {}
             self.patches = patches or empty_patches()
-            self.first_seen = first_seen or {}
+            self.seen_days = seen_days or {}
 
     def context_payload(self):
         with self._lock:
@@ -529,7 +532,7 @@ class PatchMapService:
             a, b = self.from_id, self.to_id
             from_name, to_name = self.from_name, self.to_name
             served = list(self.served_ids)
-            first_seen = self.first_seen
+            seen_days = self.seen_days
         ca = station_coords(stations, a)
         cb = station_coords(stations, b)
         kind = patch_kind(patches, sid, a, b)
@@ -550,7 +553,7 @@ class PatchMapService:
             if extra:
                 mapped.append(extra)
                 seen.add(vid)
-        add_first_seen(mapped, first_seen)
+        add_seen(mapped, seen_days)
         return {
             "statusId": sid,
             "corridorKm": CORRIDOR_KM,
@@ -576,8 +579,8 @@ class PatchMapService:
         with self._lock:
             stations = self.stations
             a, b = self.from_id, self.to_id
-            first_seen = self.first_seen
-        return add_first_seen(search_stations(stations, query, a, b), first_seen)
+            seen_days = self.seen_days
+        return add_seen(search_stations(stations, query, a, b), seen_days)
 
     def apply_save(self, mode, via_raw):
         with self._lock:

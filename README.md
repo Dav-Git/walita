@@ -180,6 +180,7 @@ Die Pfade gelten auch für `--edit`; der Editor liest und schreibt dieselben Dat
 | `--demo` | Nur Dashboard aus `examples/` bauen – kein API-Download, kein Token |
 | `--dashboard-only` | Export überspringen, Dashboard aus vorhandener `data/` neu bauen |
 | `--edit` | Tag-Editor statt Export + Dashboard (siehe [Tag-Editor](#tag-editor)) |
+| `--scale F` | Nur mit `--edit`: Zoom der Editor-Oberfläche, z.B. `1.5` |
 
 `--demo`, `--dashboard-only` und `--edit` schließen sich gegenseitig aus.
 `--demo` und `--dashboard-only` laden nichts von der API; zusammen mit einem
@@ -375,13 +376,15 @@ ziehbar (sofort gespeichert). Zwei Stationen wählen, **Wird aufgelöst** /
 **Bleibt**, dann **Zusammenführen**. Listen in der Sidebar setzen Moves und
 Merges zurück. Weitere Stationen per Name oder ID suchen. Internet nur für Kacheln.
 
-Beide Karten haben das Feld **Entdeckt ab**. Es blendet Stationen aus, deren
-erste Fahrt (frühester Status, in dessen Trip die Stations-ID vorkommt) vor
-dem Datum liegt. So verschwinden alte Stammdatensätze, die Träwelling später
-durch neue IDs ersetzt hat. Sichtbar bleiben immer Start/Ziel, Via und Halte
-der Fahrt (Kantenkarte) bzw. Auswahl, Merge-Ziele, verschobene Stationen und
-Suchtreffer (Stationskarte). Das Datum steht in Popup und Suchliste; jede
-Karte merkt sich ihren Wert im Browser.
+Beide Karten haben zwei Datumsfelder. **Entdeckt ab** blendet Stationen aus,
+deren erste Fahrt (frühester Status, in dessen Trip die Stations-ID vorkommt)
+vor dem Datum liegt. **Zuletzt gesehen ab** blendet Stationen aus, deren
+letzte Fahrt vor dem Datum liegt. So verschwinden alte Stammdatensätze, die
+nach einem Datenstand-Wechsel in keiner Fahrt mehr vorkommen, während weiter
+befahrene Stationen sichtbar bleiben. Sichtbar bleiben außerdem immer
+Start/Ziel, Via und Halte der Fahrt (Kantenkarte) bzw. Auswahl, Merge-Ziele,
+verschobene Stationen und Suchtreffer (Stationskarte). Beide Daten stehen in
+Popup und Suchliste; jede Karte merkt sich ihre Werte im Browser.
 
 ### Linien-Patches
 
@@ -404,6 +407,39 @@ Abgleich den alten Tag (`cleared` in der Datei). **Fahrten zeigen** filtert
 exakt auf die Linie (Anzeige in der Fußzeile, Suche hebt den Filter auf).
 `statuses.json` bleibt unverändert. Ungültiges JSON in der Datei bricht den
 Bau ab; der Editor schreibt sie dann nicht und gleicht nicht ab.
+
+Optional bekommt eine Linie einen **Kartennamen** (*Linien → Verwaltung*,
+**Kartenname …**, leer = Linienname). Er ersetzt nur den Badge-Text im
+Kartenmodus *Linien*; Linienname, Filter und Tabellen bleiben unverändert,
+es gibt keinen Tag. Ein Kartenname an einer zusammengeführten Linie gilt für
+ihr Ziel, solange das Ziel keinen eigenen hat. **Löschen** auf einer Zeile ohne
+Merge entfernt den Kartennamen.
+
+```json
+{
+  "labels": [
+    {"line": "RE 1", "operator": "Beispielbahn", "label": "RE1 Express"}
+  ]
+}
+```
+
+### Betreiber je Fahrt
+
+Ältere Check-ins haben oft keinen Betreiber. Gleichnamige Linien
+verschiedener Betreiber fallen dann im Dashboard zu einer Linie zusammen. Im
+Editor (*Darstellung → Betreiber*) setzt **Übernehmen** den Betreiber für alle
+markierten Fahrten. Ein typischer
+Ablauf: Betreiber-Filter *(ohne Betreiber)*, Suche nach der Linie oder
+Station, Strg+A, Betreiber wählen oder eintippen, **Übernehmen**.
+**Zurücksetzen** entfernt den eigenen Wert.
+
+Der Betreiber wird nur als Tag `walita:operator` gespeichert. Es gibt keine
+lokale Datei, **Speichern** lädt den Tag nach Träwelling hoch. Ein Wert gleich
+dem Betreiber von Träwelling wird nicht gesetzt. Der Tag hat Vorrang vor
+`checkin.operator.name` und gilt vor Linien-Patches, *Betreiber → Je Linie*
+und dem Heimatregion-Filter. Merges und Regeln nennen also den Betreiber aus
+dem Tag. `statuses.json` bleibt bis auf den Tag unverändert. Das Dashboard
+sieht neue Werte erst nach **Speichern**.
 
 ### Linienfarben-Patches
 
@@ -697,8 +733,19 @@ python3 build_dashboard.py --line-patches data/line_patches.json --open
 
 Lokales tkinter-Fenster mit drei Bereichen:
 
-- **Werkzeugleiste**: *Von API laden* (Strg+R), *Speichern (n)* (Strg+S) mit der
-  Anzahl ungespeicherter Fahrten, *Dashboard bauen*.
+- **Werkzeugleiste**: *Von API laden* (Strg+R) mit Menü ▾: **Normal** lädt
+  neue Fahrten und die letzten 2 Tage, ältere bleiben; **Vollständig**
+  (Strg+Umschalt+R) lädt alle; **Seit Datum …** lädt die Fahrten nach dem
+  gewählten Tag, ältere bleiben (das Datum merkt sich der Editor). Lokal
+  vorhandene Fahrten im geladenen Bereich, die Träwelling nicht mehr liefert,
+  fallen weg. Dazu *Speichern (n)* (Strg+S) mit der
+  Anzahl ungespeicherter Fahrten, *Dashboard bauen*, rechts der Zoom
+  (− / + oder Strg+Minus / Strg+Plus, Klick auf die Prozentzahl oder Strg+0
+  = 100 %). Der Zoom vergrößert Schriften, Zeilen, Spalten und Bedienelemente
+  und wird in `data/editor_state.json` gespeichert. Beim ersten Start übernimmt
+  der Editor unter Linux die Systemskalierung (`GDK_SCALE`, `Xft.dpi` oder
+  GNOME-Textskalierung), sonst 100 %. `--scale 1.5` setzt den Startwert
+  (auch `walita.py --edit --scale 1.5`).
 - **Navigation** links: *Fahrten* mit den Ansichten *Alle*, *Ohne Baureihe* und
   *Geändert*, darunter je Konfig-Datei eine Einstellungsseite.
 - **Inhalt** der gewählten Seite.
@@ -706,9 +753,19 @@ Lokales tkinter-Fenster mit drei Bereichen:
 **Fahrten.** Filter über Suche (Strg+F), Zeitraum, Betreiber und die Häkchen
 *ohne Baureihe*, *ohne Nummer*, *mit lokalem Patch*, *geändert*. Spalten:
 Datum, Linie, Von → Nach, Betreiber, Baureihe, Nummer und ◆ mit den lokalen
-Patches der Fahrt (E Einstieg, F Farbe, K Kante, D Durchbindung). Baureihe und
-Nummer sind direkt in der Liste editierbar (Klick oder F2; Enter = nächste
-Zeile, Tab = nächste Spalte). Geänderte Fahrten sind fett und mit ● markiert.
+Patches der Fahrt (E Einstieg, F Farbe, K Kante, D Durchbindung, L Linie,
+B Betreiber). Baureihe und Nummer sind direkt in der Liste editierbar (Klick
+oder F2; Enter = nächste Zeile, Tab = nächste Spalte). Geänderte Fahrten sind
+fett und mit ● markiert. Mit Strg/Umschalt+Klick oder Strg+A lassen sich
+mehrere Fahrten markieren, etwa um ihnen gemeinsam einen
+[Betreiber](#betreiber-je-fahrt) zu geben.
+
+Rechtsklick (oder Umschalt+F10) auf eine Fahrt: **Trip von Träwelling neu
+laden** holt die Halte der markierten Fahrten erneut und überschreibt sie in
+`data/trips.json` und `data/statuses.json` ohne Abgleich. Echtzeiten aus
+einem früheren Abruf und Ausfälle (`cancelled`) gehen dabei verloren, wenn
+Träwelling sie nicht mehr liefert. Neue Stationen landen in
+`data/stations.json`. Fahrten, deren Abruf scheitert, bleiben unverändert.
 
 Rechts stehen die Details der gewählten Fahrt in einklappbaren Gruppen:
 
@@ -716,7 +773,7 @@ Rechts stehen die Details der gewählten Fahrt in einklappbaren Gruppen:
 | --- | --- | --- |
 | Fahrzeug | Baureihe (Auswahl oder frei), Nummer ([Doppeltraktion](#doppeltraktion) mit `+`, z.B. `463001+463501`), Hinweis ob im Fuhrpark | Träwelling |
 | Fahrtverlauf | Einstieg, Durchbindung (`dubi=start` / `dubi=ende`), Kanten mit **Auf Karte anreichern** und **Patch entfernen ▾** | lokal (Durchbindung: Träwelling) |
-| Darstellung | Linienfarbe | lokal |
+| Darstellung | Betreiber (für alle markierten Fahrten), Linie, Linienfarbe | Betreiber: Träwelling; Linie: lokal + Träwelling; Farbe: lokal |
 | Text & Tags | Status-Text, weitere Tags (Sitz, Wagen, …) | Träwelling |
 
 **Speichern** öffnet ein Übertragungsfenster (Fahrt für Fahrt: Wartend /
@@ -752,6 +809,7 @@ zuletzt gewählte Seite stehen in `data/editor_state.json`.
 ```bash
 python3 walita.py --edit
 python3 walita.py --edit --login    # OAuth mit read-statuses write-statuses
+python3 walita.py --edit --scale 1.5  # Editor mit 150 % Zoom
 python3 status_editor.py            # direkt, gleiche Auth-Flags wie der Export
 ```
 
@@ -831,6 +889,37 @@ festen Flotte je Linie, damit sich Nummern wiederholen – inklusive einiger
 Doppeltraktionen für `--ignore-plus`.
 
 ## Changelog
+
+### 1.2
+
+- **Betreiber je Fahrt:** Tag `walita:operator`, im Editor
+  (*Darstellung → Betreiber*) für mehrere markierte Fahrten auf einmal
+  setzbar und beim **Speichern** nach Träwelling übertragen. Trennt
+  gleichnamige Linien, denen der Betreiber fehlt. Der Tag gilt auch für
+  Linien-Merges, *Betreiber → Je Linie*, die Heimatregion sowie den
+  Betreiber-Filter und die Betreiber-Spalte im Editor. Markierung **B** in der
+  Fahrtenliste. Siehe [Betreiber je Fahrt](#betreiber-je-fahrt).
+- **Linien-Patches:** Optionaler **Kartenname** je Linie (*Linien →
+  Verwaltung*, **Kartenname …**) als Badge-Text im Kartenmodus *Linien*, ohne
+  Tag. Gilt bei Merges für das Ziel, solange es keinen eigenen hat.
+- **Tag-Editor:** Mehrfachauswahl in der Fahrtenliste (Strg/Umschalt+Klick,
+  Strg+A).
+- **Tag-Editor:** *Von API laden* mit Menü ▾: **Normal** (neue + letzte
+  2 Tage), **Vollständig** (Strg+Umschalt+R) und **Seit Datum …**.
+- **Tag-Editor:** Rechtsklick auf Fahrten → **Trip von Träwelling neu laden**
+  holt die Halte der markierten Fahrten neu und überschreibt sie lokal.
+- **Tag-Editor:** Zoom für hochauflösende Bildschirme: − / + in der
+  Werkzeugleiste, Strg+Plus/Minus/0 oder `--scale` (auch
+  `walita.py --edit --scale`). Schriften, Zeilen, Spalten, Checkboxen und
+  Scrollbalken wachsen mit, auch in Dialogen. Der Wert wird gespeichert. Beim
+  ersten Start unter Linux wird die Systemskalierung übernommen.
+- **Tag-Editor:** In schmalen Detailbereichen bleiben die Knöpfe bei Betreiber,
+  Linie und Linienfarbe lesbar; das Eingabefeld wird schmaler.
+- **Patch-Karten:** Zweites Datumsfeld *Zuletzt gesehen ab* blendet
+  Stationen aus, deren letzte Fahrt vor dem Datum liegt. So verschwinden alte
+  Stammdatensätze nach einem Datenstand-Wechsel, weiter befahrene Stationen
+  bleiben sichtbar. Popup und Suchliste zeigen zusätzlich das Datum der
+  letzten Sichtung.
 
 ### 1.1
 

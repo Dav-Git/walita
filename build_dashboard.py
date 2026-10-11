@@ -39,6 +39,7 @@ from line_color_patches import to_css_pair
 from home_region import filter_statuses, load_operators
 from line_patches import apply_to_statuses as apply_line_patches
 from line_patches import load_patches as load_line_patches
+from line_patches import resolved_labels as resolved_line_labels
 from operator_line_patches import apply_to_statuses as apply_operator_line_patches
 from operator_line_patches import load_rules as load_operator_line_rules
 from vehicle_roster import load_roster
@@ -2467,9 +2468,10 @@ def main(argv=None):
         return 2
     statuses, n_line = apply_line_patches(line_patches, statuses)
     if n_line:
-        log(f"Linien-Patches: {n_line} Fahrten umbenannt "
+        log(f"Linien-Patches: {n_line} Fahrten geändert "
             f"({len(line_patches['overrides'])} je Fahrt, "
-            f"{len(line_patches['merges'])} Merges, Rest aus walita:line-Tags).")
+            f"{len(line_patches['merges'])} Merges, Rest aus "
+            f"walita:line-/walita:operator-Tags).")
 
     try:
         operator_line_rules = load_operator_line_rules(args.operator_line_patches)
@@ -2519,6 +2521,13 @@ def main(argv=None):
             f"{data['kpis']['count']} Fahrten.")
     if n_roster:
         data["vehicleRoster"] = vehicle_roster
+    line_labels = resolved_line_labels(line_patches, operator_line_rules)
+    if line_labels:
+        data["lineLabels"] = {
+            line_key(line, op): label
+            for (line, op), label in sorted(line_labels.items())
+        }
+        log(f"Kartennamen: {len(line_labels)} Linien aus {args.line_patches}.")
     log(f"Ausgewertet: {data['kpis']['count']} Fahrten, {len(data['edges'])} Karten-Kanten, "
         f"{len(data['segments'])} Segmente.")
 

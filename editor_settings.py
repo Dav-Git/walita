@@ -21,6 +21,12 @@ import operator_replacements as orp
 import station_patches as sp
 import vehicle_roster as vr
 
+# Benannte Schriften; der Editor legt sie an und skaliert sie mit dem Zoom.
+FONT_SECTION = "WalitaSection"
+FONT_TITLE = "WalitaTitle"
+FONT_HEADING = "WalitaHeading"
+FONT_BOLD = "WalitaBold"
+
 
 def check_config_file(path, pairs=False):
     """Fehlertext, wenn `path` kein gültiges JSON-Objekt ist, sonst None.
@@ -51,9 +57,8 @@ def _line(status):
 
 
 def _operator(status):
-    op = ((status or {}).get("checkin") or {}).get("operator")
-    v = op.get("name") if isinstance(op, dict) else None
-    return v.strip() if isinstance(v, str) else ""
+    """Betreiber aus walita:operator, sonst aus dem Check-in."""
+    return lp.line_and_operator(status or {})[1]
 
 
 def operators_in(statuses):
@@ -97,7 +102,7 @@ class TablePage(ttk.Frame):
         self.read_only = False
         head = ttk.Frame(self)
         head.pack(fill="x")
-        ttk.Label(head, text=title, font=("TkDefaultFont", 13, "bold")).pack(anchor="w")
+        ttk.Label(head, text=title, font=FONT_HEADING).pack(anchor="w")
         ttk.Label(head, text=f"{path} · {effect}").pack(anchor="w")
         self.error_var = tk.StringVar()
         ttk.Label(head, textvariable=self.error_var, foreground="#c01c28",
@@ -254,12 +259,13 @@ class TablePage(ttk.Frame):
 class FieldsDialog(tk.Toplevel):
     """Modaler Dialog mit Comboboxen; result = Liste der Werte oder None."""
 
-    def __init__(self, master, title, fields):
+    def __init__(self, master, title, fields, allow_empty=False):
         super().__init__(master)
         self.title(title)
         self.transient(master)
         self.resizable(False, False)
         self.result = None
+        self.allow_empty = allow_empty
         self.vars = []
         frame = ttk.Frame(self, padding=12)
         frame.pack(fill="both", expand=True)
@@ -282,7 +288,7 @@ class FieldsDialog(tk.Toplevel):
 
     def _ok(self):
         values = [v.get().strip() for v in self.vars]
-        if not all(values):
+        if not self.allow_empty and not all(values):
             messagebox.showerror("Eingabe", "Bitte alle Felder ausfüllen.", parent=self)
             return
         self.result = values
@@ -407,10 +413,11 @@ class LinesPage(TablePage):
         super().__init__(
             parent, ctx, "Linien", ctx.paths["lines"],
             "wirkt beim nächsten Dashboard-Bau; Tags beim Speichern",
-            ("line", "operator", "count", "target"),
+            ("line", "operator", "count", "target", "label"),
             {"line": "Linie", "operator": "Betreiber", "count": "Fahrten",
-             "target": "Zusammengeführt in"},
-            widths={"line": 110, "operator": 240, "count": 70, "target": 280})
+             "target": "Zusammengeführt in", "label": "Kartenname"},
+            widths={"line": 110, "operator": 240, "count": 70, "target": 280,
+                    "label": 120})
         self.patches = lp.empty_patches()
 
     @staticmethod
@@ -431,18 +438,22 @@ class LinesPage(TablePage):
     def rows(self):
         counts = self._counts()
         aliases = lp.alias_map(self.patches)
-        keys = set(counts) | set(self.patches["merges"])
+        labels = self.patches["labels"]
+        keys = set(counts) | set(self.patches["merges"]) | set(labels)
         out = []
         for key in sorted(keys):
             dest = aliases.get(key)
             target = "→ " + " · ".join(p for p in dest if p) if dest else ""
-            out.append((self.iid_of(key), (key[0], key[1], counts.get(key, 0), target),
+            out.append((self.iid_of(key),
+                        (key[0], key[1], counts.get(key, 0), target,
+                         labels.get(key, "")),
                         ("orphan",) if dest else ()))
         return out
 
     def orphans(self):
         counts = self._counts()
-        return {self.iid_of(k) for k in self.patches["merges"] if not counts.get(k)}
+        keys = set(self.patches["merges"]) | set(self.patches["labels"])
+        return {self.iid_of(k) for k in keys if not counts.get(k)}
 
     def _store(self, msg):
         if not lp.save_patches(self.path, self.patches):
@@ -492,19 +503,46 @@ class LinesPage(TablePage):
         if dlg.result:
             self.merge_keys([key], (dlg.result[0], dlg.result[1]))
 
+    def _set_label(self):
+        sel = list(self.tree.selection())
+        if not sel or self.read_only:
+            return
+        keys = [self.key_of(i) for i in sel]
+        current = self.patches["labels"].get(keys[0], "")
+        dlg = FieldsDialog(self, "Kartenname (leer = Linienname)",
+                           [("Kartenname", current, [])], allow_empty=True)
+        if dlg.result is None:
+            return
+        label = dlg.result[0].strip()
+        for k in keys:
+            lp.set_label(self.patches, k, label)
+        what = f"„{label}“" if label else "entfernt"
+        self._store(f"Kartenname {what} für {len(keys)} Linie(n).")
+
     def delete(self, iids):
-        """Löst Merges; gespiegelte Tags mit dem alten Ziel werden entfernt."""
+        """Löst Merges; gespiegelte Tags mit dem alten Ziel werden entfernt.
+
+        Zeilen ohne Merge verlieren ihren Kartennamen.
+        """
         aliases = lp.alias_map(self.patches)
-        n_tags = 0
+        n_merges = n_tags = n_labels = 0
         for iid in iids:
             key = self.key_of(iid)
+            if key not in self.patches["merges"]:
+                if key in self.patches["labels"]:
+                    lp.set_label(self.patches, key, "")
+                    n_labels += 1
+                continue
             dest = aliases.get(key)
             lp.clear_merge(self.patches, key)
+            n_merges += 1
             if dest:
                 for sid in self.ctx.clear_line_tags(key, dest[0]):
                     lp.mark_cleared(self.patches, sid)
                     n_tags += 1
-        msg = f"{len(iids)} Merge(s) gelöst."
+        msg = f"{n_merges} Merge(s) gelöst."
+        if n_labels:
+            msg += f" {n_labels} Kartenname(n) entfernt."
         if n_tags:
             msg += f" walita:line auf {n_tags} Fahrt(en) zum Löschen vorgemerkt."
         self._store(msg)
@@ -517,6 +555,7 @@ class LinesPage(TablePage):
 
     def extra_buttons(self, frame):
         self._btn(frame, "Zusammenführen …", self._merge_selected)
+        self._btn(frame, "Kartenname …", self._set_label)
         self._btn(frame, "Als Tag auf Fahrten übertragen",
                   lambda: self.stage_tags(list(self.tree.selection())))
         self._btn(frame, "Fahrten zeigen", self._show_trips)
@@ -558,7 +597,7 @@ def ride_counts_by_operator(statuses):
 
 
 def _page_head(frame, title, path, effect):
-    ttk.Label(frame, text=title, font=("TkDefaultFont", 13, "bold")).pack(anchor="w")
+    ttk.Label(frame, text=title, font=FONT_HEADING).pack(anchor="w")
     ttk.Label(frame, text=f"{path} · {effect}", foreground="#666666").pack(anchor="w")
     error_var = tk.StringVar()
     ttk.Label(frame, textvariable=error_var, foreground="#c01c28",

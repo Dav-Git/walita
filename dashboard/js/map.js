@@ -770,7 +770,10 @@ let map=null, mapBounds=[], mapFitted=false;
     return vGroupColor.get(gid) || {bg:"#64748b", fg:"#fff"};
   }
   function groupBadgeText(gid){
-    if(isLineMode()) return lineName(GROUPS[gid]||"") || "–";
+    if(isLineMode()){
+      const k=GROUPS[gid]||"";
+      return (DATA.lineLabels||{})[k] || lineName(k) || "–";
+    }
     if(isLocMode()) return GROUPS[gid] || "–";
     const v=VEH[gid];
     return (v && v[1]) ? v[1] : "–";

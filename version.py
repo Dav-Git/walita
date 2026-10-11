@@ -4,5 +4,5 @@
 """Version und User-Agent an einer Stelle.
 """
 
-__version__ = "1.1"
+__version__ = "1.2"
 USER_AGENT = f"walita/{__version__} (+https://github.com/besuka97/walita)"

@@ -10,11 +10,16 @@ Dashboard-Bau gelesen. Quelle `statuses.json` bleibt unangetastet.
 import json
 import os
 
+import line_patches
+
 
 def operator_name(status):
-    """`checkin.operator.name`, sonst leer."""
+    """Tag `walita:operator`, sonst `checkin.operator.name`, sonst leer."""
     if not isinstance(status, dict):
         return ""
+    tagged = line_patches.tag_operator(status)
+    if tagged:
+        return tagged
     checkin = status.get("checkin") or {}
     if not isinstance(checkin, dict):
         return ""

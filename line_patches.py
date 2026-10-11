@@ -8,18 +8,27 @@ Der Editor spiegelt den effektiven Namen als Tag `walita:line` nach
 Träwelling und liest ihn beim Laden zurück. Beim Dashboard-Bau gilt der Tag
 nur, wenn die Datei für die Fahrt nichts festlegt. `statuses.json` bleibt
 unverändert; alles wirkt auf Kopien.
+
+Der Betreiber je Fahrt steht nur im Tag `walita:operator` (keine Datei). Er
+ersetzt `checkin.operator.name` vor Override und Merge, damit gleichnamige
+Linien ohne HAFAS-Betreiber nicht zusammenfallen.
+
+`labels` sind optionale Kartennamen je Linie (Badge-Text im Kartenmodus
+Linien); sie ändern weder Linienname noch Schlüssel.
 """
 
 import json
 import os
 
 KEY_LINE = "walita:line"
+KEY_OPERATOR = "walita:operator"
 
 
 def empty_patches():
     # cleared: zurückgesetzte Fahrten, deren alter walita:line-Tag nicht mehr
     # zählt, bis er bei Träwelling gelöscht ist.
-    return {"overrides": {}, "merges": {}, "cleared": set(), "comments": []}
+    return {"overrides": {}, "merges": {}, "labels": {}, "cleared": set(),
+            "comments": []}
 
 
 def status_id(value):
@@ -79,6 +88,15 @@ def load_patches(path):
         src, dest = _line_key(row.get("from")), _line_key(row.get("to"))
         if src and dest and src != dest:
             out["merges"][src] = dest
+    raw_l = data.get("labels") or []
+    if not isinstance(raw_l, list):
+        raise ValueError(f"Linien-Patches {path}: 'labels' muss eine Liste sein.")
+    for row in raw_l:
+        if not isinstance(row, dict):
+            continue
+        key, label = _line_key(row), _clean(row.get("label"))
+        if key and label:
+            out["labels"][key] = label
     raw_c = data.get("cleared") or []
     if not isinstance(raw_c, list):
         raise ValueError(f"Linien-Patches {path}: 'cleared' muss eine Liste sein.")
@@ -101,6 +119,12 @@ def dumps_patches(patches):
          "to": {"line": d[0], "operator": d[1]}}
         for s, d in sorted((patches.get("merges") or {}).items())
     ]
+    labels = patches.get("labels") or {}
+    if labels:
+        payload["labels"] = [
+            {"line": k[0], "operator": k[1], "label": v}
+            for k, v in sorted(labels.items())
+        ]
     cleared = patches.get("cleared") or ()
     if cleared:
         payload["cleared"] = sorted(cleared, key=str)
@@ -162,6 +186,43 @@ def clear_merge(patches, src):
     (patches.get("merges") or {}).pop((_clean(src[0]), _clean(src[1])), None)
 
 
+def set_label(patches, key, label):
+    """Kartenname einer Linie; leer entfernt ihn."""
+    key = (_clean(key[0]), _clean(key[1]))
+    if not key[0]:
+        return False
+    label = _clean(label)
+    labels = patches.setdefault("labels", {})
+    if label:
+        labels[key] = label
+    else:
+        labels.pop(key, None)
+    return True
+
+
+def resolved_labels(patches, operator_rules=None):
+    """{(Linie, Betreiber): Kartenname} für die Schlüssel nach allen Patches.
+
+    Ein Label an einer zusammengeführten Linie gilt für ihr Ziel, außer das
+    Ziel hat ein eigenes. Operator-Linien-Regeln (Tupel line, operator, name)
+    verschieben den Schlüssel wie beim Dashboard-Bau.
+    """
+    labels = (patches or {}).get("labels") or {}
+    aliases = alias_map(patches)
+
+    def final(key):
+        line, op = aliases.get(key, key)
+        for rule_line, rule_op, rule_name in operator_rules or ():
+            if line == rule_line and op == rule_op:
+                return line, rule_name
+        return line, op
+
+    out = {}
+    for key in sorted(labels, key=lambda k: (k in aliases, k)):
+        out.setdefault(final(key), labels[key])
+    return out
+
+
 def alias_map(patches):
     """Quelle → endgültiges Ziel. Ketten flach, Zyklen verworfen."""
     raw = dict((patches or {}).get("merges") or {})
@@ -180,7 +241,8 @@ def alias_map(patches):
     return out
 
 
-def line_and_operator(status):
+def api_line_and_operator(status):
+    """(Linie, Betreiber) wie von der API, ohne Tags und Patches."""
     checkin = status.get("checkin") if isinstance(status, dict) else None
     if not isinstance(checkin, dict):
         return "", ""
@@ -191,6 +253,16 @@ def line_and_operator(status):
     )
 
 
+def tag_operator(status):
+    return _tag(status, KEY_OPERATOR)
+
+
+def line_and_operator(status):
+    """(Linie, Betreiber): HAFAS-Linie, Betreiber aus walita:operator oder API."""
+    line, op = api_line_and_operator(status)
+    return line, tag_operator(status) or op
+
+
 def source_key(status, patches):
     """(Linie, Betreiber) nach Override, vor Merge und ohne Tag."""
     line, op = line_and_operator(status)
@@ -198,11 +270,15 @@ def source_key(status, patches):
     return ((patches or {}).get("overrides") or {}).get(sid, line), op
 
 
-def tag_line(status):
+def _tag(status, key):
     for t in (status or {}).get("tags") or []:
-        if isinstance(t, dict) and _clean(t.get("key")) == KEY_LINE:
+        if isinstance(t, dict) and _clean(t.get("key")) == key:
             return _clean(t.get("value"))
     return ""
+
+
+def tag_line(status):
+    return _tag(status, KEY_LINE)
 
 
 def effective_line(status, patches, aliases=None, use_tag=True):
@@ -242,15 +318,18 @@ def _with_line(status, line, op):
 
 
 def apply_to_statuses(patches, statuses, use_tag=True):
-    """Kopien mit effektivem Linienname/Betreiber. Gibt (liste, anzahl)."""
+    """Kopien mit effektivem Linienname/Betreiber (inkl. walita:operator).
+
+    Gibt (liste, anzahl).
+    """
     aliases = alias_map(patches)
     out, n = [], 0
     for s in statuses or []:
         if not isinstance(s, dict):
             out.append(s)
             continue
-        line, op, source = effective_line(s, patches, aliases, use_tag)
-        if not source or (line, op) == line_and_operator(s):
+        line, op, _source = effective_line(s, patches, aliases, use_tag)
+        if (line, op) == api_line_and_operator(s):
             out.append(s)
             continue
         out.append(_with_line(s, line, op))
@@ -262,8 +341,8 @@ def preview_status(status, patches):
     """Anzeige-Kopie mit effektiver Linie; ohne Änderung dasselbe Objekt."""
     if not isinstance(status, dict):
         return status
-    line, op, source = effective_line(status, patches)
-    if not source or (line, op) == line_and_operator(status):
+    line, op, _source = effective_line(status, patches)
+    if (line, op) == api_line_and_operator(status):
         return status
     return _with_line(status, line, op)
 

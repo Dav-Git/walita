@@ -80,6 +80,11 @@
       <input id="since" type="date" title="Stationen mit erster Sichtung vor diesem Datum ausblenden">
       <button type="button" id="sinceClear" title="Datum leeren">×</button>
     </div>
+    <div class="muted">Zuletzt gesehen ab (letzte Fahrt mit dieser Station)</div>
+    <div class="daterow">
+      <input id="lastSince" type="date" title="Stationen ausblenden, deren letzte Sichtung vor diesem Datum liegt">
+      <button type="button" id="lastSinceClear" title="Datum leeren">×</button>
+    </div>
     <div class="muted" id="sinceInfo"></div>
   </div>
   <div class="legend">
@@ -109,31 +114,44 @@
   let markers=new Map();
   let line=null;
   const SINCE_KEY="walita-edgemap-since";
+  const LAST_SINCE_KEY="walita-edgemap-lastseen";
   const sinceEl=document.getElementById("since");
+  const lastSinceEl=document.getElementById("lastSince");
   const sinceInfoEl=document.getElementById("sinceInfo");
-  function loadSince(){
-    try{ return localStorage.getItem(SINCE_KEY)||""; }catch(e){ return ""; }
+  function loadSince(key){
+    try{ return localStorage.getItem(key)||""; }catch(e){ return ""; }
   }
-  function storeSince(v){
-    try{ if(v) localStorage.setItem(SINCE_KEY, v); else localStorage.removeItem(SINCE_KEY); }catch(e){}
+  function storeSince(key, v){
+    try{ if(v) localStorage.setItem(key, v); else localStorage.removeItem(key); }catch(e){}
   }
-  sinceEl.value=loadSince();
-  // Ohne Datum oder ohne bekannte erste Sichtung bleibt eine Station sichtbar.
+  sinceEl.value=loadSince(SINCE_KEY);
+  lastSinceEl.value=loadSince(LAST_SINCE_KEY);
+  // Ohne Datum oder ohne bekannte Sichtung bleibt eine Station sichtbar.
   function seenOk(st){
-    const since=sinceEl.value;
-    return !since || !st.firstSeen || st.firstSeen>=since;
+    const since=sinceEl.value, lastSince=lastSinceEl.value;
+    return (!since || !st.firstSeen || st.firstSeen>=since)
+      && (!lastSince || !st.lastSeen || st.lastSeen>=lastSince);
+  }
+  function seenText(st, first, last){
+    const parts=[];
+    if(st.firstSeen) parts.push(first+" "+st.firstSeen);
+    if(st.lastSeen&&st.lastSeen!==st.firstSeen) parts.push(last+" "+st.lastSeen);
+    return parts.join(" · ");
   }
   function paintSinceInfo(total, hidden){
-    sinceInfoEl.textContent=sinceEl.value&&hidden
+    sinceInfoEl.textContent=(sinceEl.value||lastSinceEl.value)&&hidden
       ? hidden+" von "+total+" Stationen ausgeblendet."
       : "";
   }
   function onSinceChange(){
-    storeSince(sinceEl.value);
+    storeSince(SINCE_KEY, sinceEl.value);
+    storeSince(LAST_SINCE_KEY, lastSinceEl.value);
     paintMarkers();
   }
   sinceEl.addEventListener("change", onSinceChange);
+  lastSinceEl.addEventListener("change", onSinceChange);
   document.getElementById("sinceClear").onclick=()=>{ sinceEl.value=""; onSinceChange(); };
+  document.getElementById("lastSinceClear").onclick=()=>{ lastSinceEl.value=""; onSinceChange(); };
 
   const map=L.map("map",{preferCanvas:true,maxZoom:19}).setView([51,10],6);
   const PROVIDERS=[
@@ -219,7 +237,8 @@
     return "<b>"+esc(st.name)+"</b><br>Klick: als Via hinzufügen"+seenLine(st);
   }
   function seenLine(st){
-    return st.firstSeen?"<br><span style=\"color:#93a2b8\">entdeckt "+esc(st.firstSeen)+"</span>":"";
+    const text=seenText(st, "entdeckt", "zuletzt");
+    return text?"<br><span style=\"color:#93a2b8\">"+esc(text)+"</span>":"";
   }
   function esc(s){
     return String(s==null?"":s).replace(/[&<>"']/g, c=>({
@@ -354,7 +373,7 @@
       const btn=document.createElement("button");
       btn.type="button";
       const dist=(st.distKm!=null?` · ${st.distKm} km zur Sehne`:"")
-        +(st.firstSeen?` · seit ${st.firstSeen}`:"");
+        +(st.firstSeen?` · ${seenText(st, "seit", "zuletzt")}`:"");
       btn.innerHTML=`${esc(st.name)}<div class="meta">ID ${esc(st.id)}${esc(dist)}</div>`;
       btn.onclick=()=>{
         addViaStation(st, {pan:true});

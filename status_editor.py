@@ -25,6 +25,8 @@ import datetime
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -53,8 +55,9 @@ KEY_VEH = "trwl:vehicle_number"
 TABLE_TAG_KEYS = (KEY_LOC, KEY_VEH)
 TABLE_TAG_SET = frozenset(TABLE_TAG_KEYS)
 KEY_LINE = lp.KEY_LINE
+KEY_OPERATOR = lp.KEY_OPERATOR
 # Tags mit eigener Bedienung; erscheinen nicht in der freien Tag-Liste.
-MANAGED_TAG_SET = TABLE_TAG_SET | {KEY_LINE}
+MANAGED_TAG_SET = TABLE_TAG_SET | {KEY_LINE, KEY_OPERATOR}
 
 TRIP_COLS = ("date", "line", "route", "operator", "loc", "veh", "marks")
 TRIP_HEADINGS = {
@@ -126,6 +129,171 @@ def _enable_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.8, 3.0, 0.1
+# ttk-Stiloptionen in Pixeln, die mit dem Zoom wachsen (sofern das Theme sie hat).
+ZOOM_STYLE_OPTIONS = (
+    ("TCheckbutton", "indicatordiameter"),
+    ("TRadiobutton", "indicatordiameter"),
+    ("TCombobox", "arrowsize"),
+    ("TScrollbar", "arrowsize"),
+)
+# Eigene Schriften (Name, Punktgröße); Größe folgt dem Zoom.
+APP_FONTS = (
+    (es.FONT_SECTION, 10),
+    (es.FONT_TITLE, 12),
+    (es.FONT_HEADING, 13),
+)
+
+
+def clamp_zoom(value):
+    """Zoom auf ZOOM_STEP gerundet und begrenzt; ungültig → None."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value <= 0:
+        return None
+    steps = round(value / ZOOM_STEP)
+    return round(min(max(steps * ZOOM_STEP, ZOOM_MIN), ZOOM_MAX), 2)
+
+
+def detect_zoom():
+    """Systemskalierung unter Linux (GDK_SCALE, Xft.dpi, GNOME); sonst 1.0.
+
+    Tk zeichnet seine Standardschriften dort in festen Pixeln und übernimmt
+    die Desktop-Skalierung nicht.
+    """
+    if sys.platform in ("win32", "darwin"):
+        return 1.0
+    try:
+        env = float(os.environ.get("GDK_SCALE") or 1) * float(
+            os.environ.get("GDK_DPI_SCALE") or 1)
+    except ValueError:
+        env = 1.0
+    if env > 0 and abs(env - 1.0) > 0.01:
+        return clamp_zoom(env) or 1.0
+
+    def run(cmd):
+        if not shutil.which(cmd[0]):
+            return ""
+        try:
+            return subprocess.run(
+                cmd, capture_output=True, text=True, timeout=2, check=False
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    m = re.search(r"^Xft\.dpi:\s*([0-9.]+)", run(["xrdb", "-query"]), re.M)
+    if m and float(m.group(1)) > 0:
+        return clamp_zoom(float(m.group(1)) / 96.0) or 1.0
+    schema = "org.gnome.desktop.interface"
+    text = run(["gsettings", "get", schema, "text-scaling-factor"]).strip()
+    whole = run(["gsettings", "get", schema, "scaling-factor"]).strip()
+    try:
+        factor = float(text or 1)
+        m = re.search(r"(\d+)$", whole)
+        if m and int(m.group(1)) > 0:
+            factor *= int(m.group(1))
+    except ValueError:
+        factor = 1.0
+    return clamp_zoom(factor) or 1.0
+
+
+class UiZoom:
+    """Vergrößert die Oberfläche: Schriften, Zeilenhöhe und Pixelmaße.
+
+    Benannte Tk-Schriften und die eigenen Schriften aus APP_FONTS werden
+    neu skaliert. Treeview-Spaltenbreiten, Label-Umbruchbreiten und feste
+    tk.Frame-Größen werden je Widget einmal auf den aktuellen Faktor
+    gebracht (`refresh`), auch in später geöffneten Dialogen.
+    """
+
+    def __init__(self, root, factor=1.0):
+        self.root = root
+        self.factor = 1.0
+        self._applied = {}
+        self._fonts = {}
+        for name in tkfont.names(root):
+            if name.startswith("Tk"):
+                font = tkfont.nametofont(name)
+                self._fonts[name] = (font, int(font.cget("size")))
+        family = tkfont.nametofont("TkDefaultFont").cget("family")
+        default_size = self._fonts["TkDefaultFont"][1]
+        for name, size in APP_FONTS + ((es.FONT_BOLD, default_size),):
+            # Fester Name, damit Widgets die Schrift per String nutzen können.
+            try:
+                font = tkfont.Font(root=root, name=name, exists=False)
+            except tk.TclError:
+                font = tkfont.Font(root=root, name=name, exists=True)
+            font.configure(family=family, size=size, weight="bold")
+            self._fonts[name] = (font, size)
+        style = ttk.Style(root)
+        self._style_base = {}
+        for name, opt in ZOOM_STYLE_OPTIONS:
+            try:
+                self._style_base[(name, opt)] = int(float(str(style.lookup(name, opt))))
+            except (ValueError, tk.TclError):
+                pass
+        root.bind_class("Toplevel", "<Map>", self._on_toplevel_map, add="+")
+        self.set(factor)
+
+    def px(self, value):
+        return int(round(value * self.factor))
+
+    def applied(self, widget):
+        return self._applied.get(str(widget), 1.0)
+
+    def set(self, factor):
+        self.factor = clamp_zoom(factor) or 1.0
+        for font, size in self._fonts.values():
+            scaled = max(1, int(round(abs(size) * self.factor)))
+            font.configure(size=-scaled if size < 0 else scaled)
+        line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        style = ttk.Style(self.root)
+        style.configure("Treeview", rowheight=max(self.px(20), line + self.px(4)))
+        for (name, opt), base in self._style_base.items():
+            style.configure(name, **{opt: max(1, self.px(base))})
+        self.refresh()
+        return self.factor
+
+    def _on_toplevel_map(self, event):
+        try:
+            self.refresh(self.root.nametowidget(str(event.widget)))
+        except (KeyError, tk.TclError):
+            pass
+
+    def refresh(self, top=None):
+        stack = [top or self.root]
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(widget.winfo_children())
+                self._scale_widget(widget)
+            except tk.TclError:
+                continue
+
+    def _scale_widget(self, widget):
+        key = str(widget)
+        ratio = self.factor / self._applied.get(key, 1.0)
+        if abs(ratio - 1.0) < 1e-9:
+            return
+        cls = widget.winfo_class()
+        if cls == "Treeview":
+            for col in ("#0",) + tuple(widget["columns"] or ()):
+                width = int(widget.column(col, "width"))
+                widget.column(col, width=max(1, int(round(width * ratio))))
+        elif cls in ("TLabel", "Label", "Message"):
+            wrap = int(float(str(widget.cget("wraplength") or 0)))
+            if wrap > 0:
+                widget.configure(wraplength=int(round(wrap * ratio)))
+        elif cls == "Frame" and not isinstance(widget, ttk.Frame):
+            for opt in ("width", "height"):
+                size = int(float(str(widget.cget(opt) or 0)))
+                if size > 0:
+                    widget.configure(**{opt: int(round(size * ratio))})
+        self._applied[key] = self.factor
 
 
 def format_api_error(exc):
@@ -375,9 +543,8 @@ MONTH_NAMES = (
 
 
 def operator_of(status):
-    op = ((status or {}).get("checkin") or {}).get("operator")
-    name = op.get("name") if isinstance(op, dict) else None
-    return name.strip() if isinstance(name, str) else ""
+    """Betreiber aus walita:operator, sonst aus dem Check-in."""
+    return lp.line_and_operator(status or {})[1]
 
 
 def has_tag(status, key):
@@ -477,6 +644,8 @@ def patch_markers(status, boarding, colors, edges, lines=None):
         out += "F"
     if lines is not None and lp.effective_line(status, lines)[2]:
         out += "L"
+    if lp.tag_operator(status):
+        out += "B"
     shown = bp.preview_status(status, boarding)
     for a, b in ep.consecutive_pairs(dl.traveled_stopovers(shown)):
         if ep.patch_kind(edges, sid, a.get("id"), b.get("id")):
@@ -510,6 +679,7 @@ DEFAULT_UI_STATE = {
     "sash": None,
     "collapsed": [],
     "page": "trips:all",
+    "zoom": None,
 }
 
 
@@ -544,7 +714,33 @@ def load_ui_state(path):
         state["collapsed"] = [x for x in raw["collapsed"] if isinstance(x, str)]
     if isinstance(raw.get("page"), str):
         state["page"] = raw["page"]
+    if not isinstance(raw.get("zoom"), bool):
+        state["zoom"] = clamp_zoom(raw.get("zoom"))
+    if isinstance(raw.get("reload_since"), str) and parse_day(raw["reload_since"]):
+        state["reload_since"] = raw["reload_since"]
     return state
+
+
+def parse_day(text):
+    """'YYYY-MM-DD' → date, sonst None."""
+    try:
+        return datetime.datetime.strptime((text or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def merge_since(fetched, existing, since):
+    """Geladene Statuses nach `since` plus die lokalen bis einschließlich `since`.
+
+    Lokale Statuses nach `since`, die die API nicht mehr liefert, gelten als
+    gelöscht. Ohne ermittelbares Datum bleiben lokale Statuses erhalten.
+    """
+    ids = {s.get("id") for s in fetched}
+    kept = [
+        s for s in existing
+        if s.get("id") not in ids and (dl.status_date(s) or "") <= since
+    ]
+    return list(fetched) + kept
 
 
 def save_ui_state(path, state):
@@ -601,6 +797,97 @@ def merge_local_body_tags_many(path, updates):
         f.write("\n")
     os.replace(tmp, path)
     return n
+
+
+def attach_local_trips(fetched, existing, trip_cache):
+    """Hängt geladenen Statuses ihre Halte an (in place).
+
+    Die Statusliste der API trägt keine Stopovers. Quelle ist der Trip-Cache
+    (`trip_id -> (stopovers, err)`), sonst `trip`/`trip_error` des bisherigen
+    Status mit derselben ID. Gibt `fetched` zurück.
+    """
+    old = {s.get("id"): s for s in existing if isinstance(s, dict)}
+    for status in fetched:
+        if not isinstance(status, dict) or "trip" in status:
+            continue
+        tid = (status.get("checkin") or {}).get("trip")
+        try:
+            stopovers = (trip_cache.get(int(tid)) or (None, None))[0]
+        except (TypeError, ValueError):
+            stopovers = None
+        prev = old.get(status.get("id")) or {}
+        if stopovers:
+            status["trip"] = {"stopovers": stopovers}
+        elif "trip" in prev:
+            status["trip"] = prev["trip"]
+            if prev.get("trip_error"):
+                status["trip_error"] = prev["trip_error"]
+    return fetched
+
+
+def _write_json_atomic(path, data, trailing_newline=True):
+    dl.ensure_parent_dir(path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        if trailing_newline:
+            f.write("\n")
+    os.replace(tmp, path)
+
+
+def refresh_trips(token, trip_ids, statuses_path, trips_path, stations_path):
+    """Lädt die Stopovers der Trips neu und überschreibt sie lokal.
+
+    Hausmeister-Aktion: kein Abgleich mit vorhandenen Daten, der neue Stand
+    ersetzt den alten in `trips.json` und in `status["trip"]` von
+    `statuses.json`. Neue Stationen landen in `stations.json`.
+    `trip_ids` ist {status_id: trip_id}. Gibt ({status_id: stopovers},
+    {status_id: fehler}) zurück; fehlgeschlagene Trips bleiben unverändert.
+    """
+    cache = {}
+    dl.fetch_stopovers(sorted(set(trip_ids.values()), key=str), token, cache)
+    fresh, errors = {}, {}
+    for sid, tid in trip_ids.items():
+        try:
+            stopovers, err = cache.get(int(tid), (None, "keine Trip-ID"))
+        except (TypeError, ValueError):
+            stopovers, err = None, "keine Trip-ID"
+        if stopovers:
+            fresh[sid] = stopovers
+        else:
+            errors[sid] = err
+    if not fresh:
+        return fresh, errors
+
+    station_cache = dl.load_station_cache(stations_path)
+    needed = {st.get("id") for sts in fresh.values() for st in sts}
+    resolved = dl.resolve_stations(
+        [{"trip": {"stopovers": sts}} for sts in fresh.values()], token,
+        cache={k: v for k, v in station_cache.items() if k in needed},
+    )
+    if any(station_cache.get(k) != v for k, v in resolved.items()):
+        station_cache.update(resolved)
+        _write_json_atomic(stations_path, station_cache, trailing_newline=False)
+
+    fresh = {sid: [dl._without_identifiers(st) for st in sts]
+             for sid, sts in fresh.items()}
+    trip_cache = dl.load_trip_cache(trips_path, statuses_path=statuses_path)
+    for sid, sts in fresh.items():
+        trip_cache[int(trip_ids[sid])] = (sts, None)
+    dl.save_trip_cache(trips_path, trip_cache)
+
+    if os.path.isfile(statuses_path):
+        with open(statuses_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        hits = 0
+        for item in data if isinstance(data, list) else ():
+            if isinstance(item, dict) and item.get("id") in fresh:
+                item["trip"] = {"stopovers": fresh[item["id"]]}
+                item.pop("trip_error", None)
+                hits += 1
+        if hits:
+            _write_json_atomic(statuses_path, data)
+    return fresh, errors
 
 
 def fetch_status(token, status_id):
@@ -1086,7 +1373,7 @@ class Section(ttk.Frame):
         arrow = ttk.Label(head, textvariable=self._arrow, cursor="hand2")
         arrow.pack(side="left")
         label = ttk.Label(
-            head, text=title, font=("TkDefaultFont", 10, "bold"), cursor="hand2"
+            head, text=title, font=es.FONT_SECTION, cursor="hand2"
         )
         label.pack(side="left", padx=(4, 0))
         if local:
@@ -1128,7 +1415,8 @@ class EditorApp:
                  operator_line_patches_path="data/operator_line_patches.json",
                  operator_replacements_path="data/operator_replacements.json",
                  ui_state_path="data/editor_state.json",
-                 line_patches_path="data/line_patches.json"):
+                 line_patches_path="data/line_patches.json",
+                 zoom=None, detect=False):
         self.root = root
         self.token = token
         self.username = username
@@ -1148,6 +1436,11 @@ class EditorApp:
         self.operator_replacements_path = operator_replacements_path
         self.ui_state_path = ui_state_path
         self.ui_state = load_ui_state(ui_state_path)
+        start_zoom = (
+            clamp_zoom(zoom) or self.ui_state.get("zoom")
+            or (detect_zoom() if detect else 1.0)
+        )
+        self.zoom = UiZoom(root, start_zoom)
         self.patches = ep.load_patches(edge_patches_path)
         self.station_patches = sp.load_patches(station_patches_path)
         self.line_color_patches = lcp.load_patches(line_color_patches_path)
@@ -1178,10 +1471,10 @@ class EditorApp:
         self._reset_baselines()
 
         root.title(f"Walita – Tag-Editor ({username})")
-        root.minsize(1100, 580)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build()
+        self._apply_zoom(self.zoom.factor)
         self._apply_filter()
         self._show_page(self.ui_state.get("page") or "trips:all")
         kids = self.trips.get_children()
@@ -1291,18 +1584,53 @@ class EditorApp:
         self._build_settings_pages()
         for seq in ("<Control-s>", "<Control-S>"):
             self.root.bind(seq, lambda _e: self._save())
-        for seq in ("<Control-r>", "<Control-R>"):
-            self.root.bind(seq, lambda _e: self._reload_from_api())
+        self.root.bind("<Control-r>", lambda _e: self._reload_from_api("normal"))
+        # Feststelltaste: Strg+R kommt als Control-R an, Umschalt zusätzlich nur bei Strg+Umschalt+R.
+        self.root.bind("<Control-R>", lambda _e: self._reload_from_api("normal"))
+        self.root.bind("<Control-Shift-R>", lambda _e: self._reload_from_api("full"))
         for seq in ("<Control-f>", "<Control-F>"):
             self.root.bind(seq, lambda _e: self._focus_search())
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            self.root.bind(seq, lambda _e: self._step_zoom(1))
+        for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
+            self.root.bind(seq, lambda _e: self._step_zoom(-1))
+        for seq in ("<Control-0>", "<Control-KP_0>"):
+            self.root.bind(seq, lambda _e: self._apply_zoom(1.0))
+
+    def _step_zoom(self, direction):
+        self._apply_zoom(self.zoom.factor + direction * ZOOM_STEP)
+        return "break"
+
+    def _apply_zoom(self, factor):
+        """Zoom setzen; Fenster-Mindestgröße und Aufteilung folgen."""
+        factor = self.zoom.set(factor)
+        self.zoom_var.set(f"{int(round(factor * 100))} %")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        self.root.minsize(
+            min(self.zoom.px(1100), max(400, screen_w - 80)),
+            min(self.zoom.px(580), max(300, screen_h - 120)),
+        )
+        self.root.after_idle(self._clamp_sash)
+        return "break"
 
     def _build_toolbar(self, parent):
         bar = ttk.Frame(parent, padding=(6, 6))
         bar.pack(fill="x")
         self.reload_btn = ttk.Button(
-            bar, text="⟳ Von API laden", command=self._reload_from_api
+            bar, text="⟳ Von API laden", command=lambda: self._reload_from_api("normal")
         )
         self.reload_btn.pack(side="left")
+        self.reload_menu_btn = ttk.Menubutton(bar, text="▾", width=2)
+        menu = tk.Menu(self.reload_menu_btn, tearoff=False)
+        menu.add_command(label="Normal (neue + letzte 2 Tage)", accelerator="Strg+R",
+                         command=lambda: self._reload_from_api("normal"))
+        menu.add_command(label="Vollständig", accelerator="Strg+Umschalt+R",
+                         command=lambda: self._reload_from_api("full"))
+        menu.add_command(label="Seit Datum …",
+                         command=lambda: self._reload_from_api("since"))
+        self.reload_menu_btn["menu"] = menu
+        self.reload_menu_btn.pack(side="left")
         self.save_btn = ttk.Button(bar, text="Speichern", command=self._save)
         self.save_btn.pack(side="left", padx=6)
         self.dash_btn = ttk.Button(
@@ -1310,6 +1638,17 @@ class EditorApp:
         )
         self.dash_btn.pack(side="left")
         ttk.Label(bar, text=f"Angemeldet als {self.username}").pack(side="right")
+        zoom_fr = ttk.Frame(bar)
+        zoom_fr.pack(side="right", padx=(0, 16))
+        ttk.Button(zoom_fr, text="−", width=3,
+                   command=lambda: self._step_zoom(-1)).pack(side="left")
+        self.zoom_var = tk.StringVar(value="100 %")
+        zoom_label = ttk.Label(zoom_fr, textvariable=self.zoom_var, width=6,
+                               anchor="center", cursor="hand2")
+        zoom_label.pack(side="left")
+        zoom_label.bind("<Button-1>", lambda _e: self._apply_zoom(1.0))
+        ttk.Button(zoom_fr, text="+", width=3,
+                   command=lambda: self._step_zoom(1)).pack(side="left")
         ttk.Separator(parent, orient="horizontal").pack(fill="x")
 
     def _build_nav(self, parent):
@@ -1410,9 +1749,13 @@ class EditorApp:
 
     def _save_ui_state(self):
         self.ui_state["sort"] = [[c, d] for c, d in self._sort_keys]
+        # Breiten bei Zoom 100 %, damit sie unter jedem Zoom passen.
+        applied = self.zoom.applied(self.trips)
         self.ui_state["widths"] = {
-            c: int(self.trips.column(c, "width")) for c in TRIP_COLS
+            c: int(round(int(self.trips.column(c, "width")) / applied))
+            for c in TRIP_COLS
         }
+        self.ui_state["zoom"] = self.zoom.factor
         try:
             self.ui_state["sash"] = int(self.trips_panes.sashpos(0))
         except tk.TclError:
@@ -1438,7 +1781,7 @@ class EditorApp:
             if total <= 1:
                 return
             pos = self.trips_panes.sashpos(0) if want is None else int(want)
-            lo = min(TRIP_PANE_MIN, total // 2)
+            lo = min(self.zoom.px(TRIP_PANE_MIN), total // 2)
             new = max(lo, min(total - lo, pos))
             if new != self.trips_panes.sashpos(0):
                 self.trips_panes.sashpos(0, new)
@@ -1505,7 +1848,7 @@ class EditorApp:
         list_fr = ttk.Frame(left)
         list_fr.pack(fill="both", expand=True, pady=(6, 0))
         self.trips = ttk.Treeview(
-            list_fr, columns=TRIP_COLS, show="headings", selectmode="browse"
+            list_fr, columns=TRIP_COLS, show="headings", selectmode="extended"
         )
         widths = self.ui_state.get("widths") or {}
         for col in TRIP_COLS:
@@ -1527,14 +1870,22 @@ class EditorApp:
         self.footer_var = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.footer_var, anchor="e").pack(fill="x")
 
-        bold = tkfont.nametofont("TkDefaultFont").copy()
-        bold.configure(weight="bold")
-        self.trips.tag_configure("dirty", font=bold)
+        self.trips.tag_configure("dirty", font=es.FONT_BOLD)
 
         self.trips.bind("<<TreeviewSelect>>", lambda _e: self._on_select())
         self.trips.bind("<Button-1>", self._on_trip_click, add="+")
         self.trips.bind("<Double-1>", self._on_trip_click, add="+")
         self.trips.bind("<F2>", self._on_f2)
+        self.trip_menu = tk.Menu(self.trips, tearoff=False)
+        # Kontextmenü-Taste: "App" unter Windows, "Menu" unter X11.
+        right = "<Button-2>" if sys.platform == "darwin" else "<Button-3>"
+        for seq in (right, "<Shift-F10>", "<App>", "<Menu>"):
+            try:
+                self.trips.bind(seq, self._on_trip_menu)
+            except tk.TclError:
+                pass
+        for seq in ("<Control-a>", "<Control-A>"):
+            self.trips.bind(seq, self._select_all_trips)
         self.trips.bind("<MouseWheel>", lambda _e: self._commit_edit())
 
     def _fill_filter_choices(self):
@@ -1570,7 +1921,7 @@ class EditorApp:
         self.title_var = tk.StringVar(value="Keine Fahrt gewählt.")
         self.meta_var = tk.StringVar(value="")
         ttk.Label(
-            right, textvariable=self.title_var, font=("TkDefaultFont", 12, "bold"),
+            right, textvariable=self.title_var, font=es.FONT_TITLE,
             wraplength=420, justify="left",
         ).pack(anchor="w")
         ttk.Label(right, textvariable=self.meta_var, wraplength=420,
@@ -1700,16 +2051,33 @@ class EditorApp:
         self._refresh_boarding()
 
     def _build_display_group(self, parent):
+        op_row = ttk.Frame(parent)
+        op_row.pack(fill="x")
+        # Knöpfe zuerst packen: bei wenig Platz schrumpft das Eingabefeld.
+        ttk.Label(op_row, text="Betreiber").pack(side="left")
+        self.operator_reset_btn = ttk.Button(
+            op_row, text="Zurücksetzen", command=lambda: self._set_operator(""))
+        self.operator_reset_btn.pack(side="right")
+        self.operator_apply_btn = ttk.Button(
+            op_row, text="Übernehmen",
+            command=lambda: self._set_operator(self.operator_field_var.get()))
+        self.operator_apply_btn.pack(side="right", padx=(0, 6))
+        self._operator_src_var = tk.StringVar(value="")
+        ttk.Label(op_row, textvariable=self._operator_src_var,
+                  foreground="#666666").pack(side="right", padx=(0, 6))
+        self.operator_field_var = tk.StringVar(value="")
+        self.operator_field = ttk.Combobox(
+            op_row, textvariable=self.operator_field_var, width=16)
+        self.operator_field.pack(side="left", fill="x", expand=True, padx=(8, 6))
+        self.operator_field.bind(
+            "<Return>", lambda _e: self._set_operator(self.operator_field_var.get()))
+        self._operator_scope_var = tk.StringVar(value="")
+        ttk.Label(parent, textvariable=self._operator_scope_var,
+                  foreground="#666666").pack(anchor="w", pady=(0, 6))
+        self._refresh_operator_field()
         line_row = ttk.Frame(parent)
         line_row.pack(fill="x", pady=(0, 6))
         ttk.Label(line_row, text="Linie").pack(side="left")
-        self.line_var = tk.StringVar(value="")
-        self.line_entry = ttk.Entry(line_row, textvariable=self.line_var, width=16)
-        self.line_entry.pack(side="left", padx=(8, 6))
-        self.line_entry.bind("<Return>", lambda _e: self._set_line(self.line_var.get()))
-        self._line_src_var = tk.StringVar(value="")
-        ttk.Label(line_row, textvariable=self._line_src_var,
-                  foreground="#666666").pack(side="left")
         self.line_reset_btn = ttk.Button(
             line_row, text="Zurücksetzen", command=lambda: self._set_line(""))
         self.line_reset_btn.pack(side="right")
@@ -1717,10 +2085,26 @@ class EditorApp:
             line_row, text="Übernehmen",
             command=lambda: self._set_line(self.line_var.get()))
         self.line_apply_btn.pack(side="right", padx=(0, 6))
+        self._line_src_var = tk.StringVar(value="")
+        ttk.Label(line_row, textvariable=self._line_src_var,
+                  foreground="#666666").pack(side="right", padx=(0, 6))
+        self.line_var = tk.StringVar(value="")
+        self.line_entry = ttk.Entry(line_row, textvariable=self.line_var, width=16)
+        self.line_entry.pack(side="left", fill="x", expand=True, padx=(8, 6))
+        self.line_entry.bind("<Return>", lambda _e: self._set_line(self.line_var.get()))
         self._refresh_line_field()
         color_row = ttk.Frame(parent)
         color_row.pack(fill="x")
         ttk.Label(color_row, text="Linienfarbe").pack(side="left")
+        # Knöpfe zuerst packen: bei wenig Platz werden die Texte abgeschnitten.
+        self.color_reset_btn = ttk.Button(
+            color_row, text="Zurücksetzen", command=self._reset_line_color
+        )
+        self.color_reset_btn.pack(side="right")
+        self.color_pick_btn = ttk.Button(
+            color_row, text="Ändern", command=self._pick_line_color
+        )
+        self.color_pick_btn.pack(side="right", padx=(0, 6))
         self._color_swatch = tk.Frame(
             color_row, width=32, height=18, relief="solid", bd=1,
             highlightthickness=0, cursor="hand2",
@@ -1732,14 +2116,6 @@ class EditorApp:
         self._color_src_var = tk.StringVar(value="")
         ttk.Label(color_row, textvariable=self._color_src_var,
                   foreground="#666666").pack(side="left", padx=(6, 0))
-        self.color_reset_btn = ttk.Button(
-            color_row, text="Zurücksetzen", command=self._reset_line_color
-        )
-        self.color_reset_btn.pack(side="right")
-        self.color_pick_btn = ttk.Button(
-            color_row, text="Ändern", command=self._pick_line_color
-        )
-        self.color_pick_btn.pack(side="right", padx=(0, 6))
         self._color_swatch.bind("<Button-1>", lambda _e: self._pick_line_color())
         self._refresh_line_color()
 
@@ -1977,7 +2353,8 @@ class EditorApp:
     def _set_busy(self, busy, msg=None):
         self._busy = busy
         state = "disabled" if busy else "normal"
-        for btn in (self.save_btn, self.reload_btn, self.dash_btn, self.edge_map_btn):
+        for btn in (self.save_btn, self.reload_btn, self.reload_menu_btn,
+                    self.dash_btn, self.edge_map_btn):
             btn.configure(state=state)
         self._sync_edge_menu()
         self._sync_dubi_buttons()
@@ -2065,11 +2442,13 @@ class EditorApp:
             return True
 
         selected_id = self.current.get("id") if self.current else None
+        marked = set(self.trips.selection())
         self.filtered = [s for s in self.statuses if keep(s)]
         self._apply_sort()
         self._ignore_select = True
         self.trips.delete(*self.trips.get_children())
         restore = None
+        keep_marked = []
         for s in self.filtered:
             sid = s.get("id")
             if sid is None:
@@ -2079,9 +2458,12 @@ class EditorApp:
             self.trips.insert("", "end", iid=iid, values=self._row_values(s), tags=tags)
             if selected_id is not None and sid == selected_id:
                 restore = iid
+            elif iid in marked:
+                keep_marked.append(iid)
         self._ignore_select = False
         if restore is not None:
-            self.trips.selection_set(restore)
+            self.trips.selection_set([restore] + keep_marked)
+            self.trips.focus(restore)
             self.trips.see(restore)
         elif self.current is not None:
             self.current = None
@@ -2178,10 +2560,83 @@ class EditorApp:
         )
 
     def _selected_status(self):
+        """Fahrt für die Details: die fokussierte in der Auswahl, sonst die erste."""
         sel = self.trips.selection()
         if not sel:
             return None
-        return self._status_by_iid(sel[0])
+        focus = self.trips.focus()
+        return self._status_by_iid(focus if focus in sel else sel[0])
+
+    def _on_trip_menu(self, event):
+        """Kontextmenü; Rechtsklick außerhalb der Markierung markiert nur die Zeile."""
+        if self._busy:
+            return "break"
+        iid = self.trips.identify_row(event.y) if event.y else ""
+        if iid and iid not in self.trips.selection():
+            self.trips.selection_set(iid)
+            self.trips.focus(iid)
+            self._on_select()
+        targets = self._selected_statuses()
+        if not targets:
+            return "break"
+        n = len(targets)
+        self.trip_menu.delete(0, "end")
+        self.trip_menu.add_command(
+            label="Trip von Träwelling neu laden" + (f" ({n} Fahrten)" if n > 1 else ""),
+            command=lambda: self._refresh_trips(targets),
+        )
+        x = event.x_root if event.x_root else self.trips.winfo_rootx() + 20
+        y = event.y_root if event.y_root else self.trips.winfo_rooty() + 20
+        self.trip_menu.tk_popup(x, y)
+        return "break"
+
+    def _refresh_trips(self, statuses):
+        """Erzwingt den Neuabruf der Stopovers (überschreibt trips.json-Eintrag)."""
+        trip_ids = {}
+        for st in statuses:
+            tid = (st.get("checkin") or {}).get("trip")
+            if st.get("id") is not None and tid not in (None, ""):
+                trip_ids[st["id"]] = tid
+        if not trip_ids:
+            self._set_status("Keine Trip-ID an der Fahrt – nichts neu zu laden.")
+            return
+        base = os.path.dirname(self.statuses_path)
+        trips_path = os.path.join(base, "trips.json")
+
+        def work():
+            return refresh_trips(self.token, trip_ids, self.statuses_path,
+                                 trips_path, self.stations_path)
+
+        def done(result):
+            fresh, errors = result
+            for st in self.statuses:
+                sts = fresh.get(st.get("id"))
+                if sts:
+                    st["trip"] = {"stopovers": sts}
+                    st.pop("trip_error", None)
+                    self._refresh_trip_row(st)
+            if self.current is not None and self.current.get("id") in fresh:
+                self._on_select()
+            msg = f"Trip neu geladen: {len(fresh)} von {len(trip_ids)} Fahrten."
+            if errors:
+                msg += " Fehler: " + "; ".join(
+                    f"{sid}: {err}" for sid, err in sorted(errors.items(), key=str))
+            self._set_status(msg)
+
+        self._run_async(work, done, busy_msg="Lade Trip von Träwelling …")
+
+    def _selected_statuses(self):
+        """Alle markierten Fahrten in Listenreihenfolge, sonst die aktuelle."""
+        out = [s for s in (self._status_by_iid(i) for i in self.trips.selection()) if s]
+        if not out and self.current is not None:
+            out = [self.current]
+        return out
+
+    def _select_all_trips(self, _event=None):
+        kids = self.trips.get_children()
+        if kids:
+            self.trips.selection_set(kids)
+        return "break"
 
     def _merged_detail_tags(self):
         """Tabellen-Tags aus dem Status, übrige aus ``_tag_rows``.
@@ -2229,6 +2684,7 @@ class EditorApp:
         self._refresh_extra_tree()
         self._refresh_edges()
         self._refresh_line_color()
+        self._refresh_operator_field()
         self._refresh_line_field()
         self._refresh_boarding()
         self._sync_dubi_buttons()
@@ -2236,6 +2692,7 @@ class EditorApp:
     def _on_select(self):
         if self._busy or self._ignore_select:
             return
+        self._refresh_operator_scope()
         nxt = self._selected_status()
         if nxt is None:
             return
@@ -2269,6 +2726,7 @@ class EditorApp:
         self._sync_dubi_buttons()
         self._refresh_edges()
         self._refresh_line_color()
+        self._refresh_operator_field()
         self._refresh_line_field()
         self._refresh_boarding()
         self._refresh_vehicle_fields()
@@ -2441,6 +2899,68 @@ class EditorApp:
         state = "normal" if has else "disabled"
         self.line_apply_btn.configure(state=state)
         self.line_reset_btn.configure(state=state)
+
+    def _refresh_operator_field(self):
+        if not hasattr(self, "operator_apply_btn"):
+            return
+        has = self.current is not None
+        if not has:
+            self.operator_field_var.set("")
+            self._operator_src_var.set("")
+        else:
+            self.operator_field_var.set(operator_of(self.current))
+            if lp.tag_operator(self.current):
+                src = "Tag"
+            elif lp.api_line_and_operator(self.current)[1]:
+                src = "HAFAS"
+            else:
+                src = "fehlt"
+            self._operator_src_var.set(src)
+        names = {operator_of(s) for s in self.statuses}
+        names |= {lp.api_line_and_operator(s)[1] for s in self.statuses}
+        names.discard("")
+        self.operator_field.configure(values=sorted(names, key=str.casefold))
+        state = "normal" if has else "disabled"
+        self.operator_apply_btn.configure(state=state)
+        self.operator_reset_btn.configure(state=state)
+        self._refresh_operator_scope()
+
+    def _refresh_operator_scope(self):
+        if not hasattr(self, "_operator_scope_var"):
+            return
+        n = len(self.trips.selection()) if hasattr(self, "trips") else 0
+        self._operator_scope_var.set(
+            f"Übernehmen/Zurücksetzen gilt für {n} markierte Fahrten" if n > 1 else "")
+
+    def _set_operator(self, name):
+        """walita:operator für alle markierten Fahrten; leer oder API-Name entfernt ihn."""
+        if self.current is None:
+            return
+        targets = self._selected_statuses()
+        name = (name or "").strip()
+        if len(targets) > 1:
+            question = (
+                f"Betreiber „{name}“ für {len(targets)} Fahrten setzen?" if name
+                else f"Betreiber-Tag von {len(targets)} Fahrten entfernen?")
+            if not messagebox.askyesno("Betreiber", question, parent=self.root):
+                return
+        self._flush_detail()
+        changed = 0
+        for s in targets:
+            api = lp.api_line_and_operator(s)[1]
+            value = name if name and name != api else ""
+            if lp.tag_operator(s) == value:
+                continue
+            set_table_tag(s, KEY_OPERATOR, value)
+            self._refresh_trip_row(s)
+            changed += 1
+        self._fill_filter_choices()
+        self._load_status(self.current)
+        self._refresh_nav_counts()
+        self._update_footer()
+        self._set_status(
+            f"Betreiber für {changed} Fahrten vorgemerkt; Upload mit Speichern."
+            if changed else "Betreiber unverändert.")
 
     def _set_line(self, name):
         """Override für die aktuelle Fahrt; leer oder HAFAS-Name entfernt ihn."""
@@ -2833,7 +3353,7 @@ class EditorApp:
             served_ids=served,
             stations=stations,
             patches=self.patches,
-            first_seen=ep.first_seen_dates(self.statuses),
+            seen_days=ep.seen_dates(self.statuses),
         )
         webbrowser.open(
             "%s?from=%s&to=%s&t=%s" % (
@@ -2897,7 +3417,8 @@ class EditorApp:
         return row, TRIP_COLS[idx]
 
     def _on_trip_click(self, event):
-        if self._busy:
+        # Strg/Umschalt erweitern die Auswahl und starten keine Zellbearbeitung.
+        if self._busy or event.state & 0x0005:
             return
         row, col = self._col_at(event)
         if col in EDIT_COLS and row:
@@ -3012,7 +3533,33 @@ class EditorApp:
             return
         self._begin_edit(next_iid, next_col)
 
-    def _reload_from_api(self):
+    def _ask_reload_since(self):
+        """Datum für „Seit Datum“; None bei Abbruch."""
+        initial = (self.ui_state.get("reload_since") or self.since
+                   or (datetime.date.today() - datetime.timedelta(days=30)).isoformat())
+        while True:
+            dlg = es.FieldsDialog(self.root, "Von API laden – seit Datum",
+                                  [("Fahrten nach (JJJJ-MM-TT)", initial, [])])
+            if not dlg.result:
+                return None
+            day = parse_day(dlg.result[0])
+            if day:
+                self.ui_state["reload_since"] = day.isoformat()
+                return day.isoformat()
+            messagebox.showerror("Von API laden", "Bitte ein Datum JJJJ-MM-TT angeben.",
+                                 parent=self.root)
+            initial = dlg.result[0]
+
+    def _reload_from_api(self, mode="normal"):
+        """Lädt Fahrten neu.
+
+        normal: ab neuester bekannter Fahrt minus INCREMENTAL_OVERLAP_DAYS,
+            ältere bleiben (mit --limit oder ohne lokale Fahrten: alles).
+        full: alle Fahrten (--since und --limit gelten weiter).
+        since: Fahrten nach dem gewählten Tag, ältere bleiben.
+        """
+        if self._busy:
+            return
         self._commit_edit()
         if self._any_dirty():
             if not messagebox.askyesno(
@@ -3021,18 +3568,49 @@ class EditorApp:
                 parent=self.root,
             ):
                 return
+        existing = list(self.statuses)
+        since = self.since or None
+        cutoff = None
+        if mode == "since":
+            since = self._ask_reload_since()
+            if not since:
+                return
+            day = datetime.datetime.strptime(since, "%Y-%m-%d")
+            cutoff = day.replace(tzinfo=datetime.timezone.utc)
+        elif mode == "normal" and not self.limit:
+            cutoff = dl.incremental_cutoff(existing)
+            if cutoff is None:
+                mode = "full"
+        else:
+            mode = "full"
 
         def work():
-            return list(dl.iter_statuses(
-                self.username, self.token, limit=self.limit, since=self.since or None
+            fetched = list(dl.iter_statuses(
+                self.username, self.token, limit=None if cutoff else self.limit,
+                since=since, stop_before=cutoff,
             ))
+            trips_path = os.path.join(os.path.dirname(self.statuses_path), "trips.json")
+            attach_local_trips(fetched, existing, dl.load_trip_cache(
+                trips_path, statuses_path=self.statuses_path))
+            if mode == "since":
+                return fetched, merge_since(fetched, existing, since)
+            if mode == "normal":
+                return fetched, dl.merge_incremental(fetched, existing)
+            return fetched, fetched
 
-        def done(statuses):
-            self._after_reload(statuses)
+        def done(result):
+            fetched, statuses = result
+            if mode == "full":
+                msg = f"{len(statuses)} Fahrten von der API geladen."
+            else:
+                scope = f"nach {since}" if mode == "since" else "neue + letzte 2 Tage"
+                msg = (f"{len(fetched)} Fahrten von der API geladen ({scope}), "
+                       f"{len(statuses)} insgesamt.")
+            self._after_reload(statuses, msg)
 
         self._run_async(work, done, busy_msg="Lade Fahrten von der API …")
 
-    def _after_reload(self, statuses):
+    def _after_reload(self, statuses, msg=None):
         self.statuses[:] = statuses
         self.current = None
         self._fill_filter_choices()
@@ -3045,7 +3623,7 @@ class EditorApp:
         page = self.ui_state.get("page", "")
         if page.startswith("settings:"):
             self._reload_visible_page(page)
-        self._set_status(f"{len(statuses)} Fahrten von der API geladen.")
+        self._set_status(msg or f"{len(statuses)} Fahrten von der API geladen.")
         self._reconcile_lines()
 
     def _dirty_statuses(self):
@@ -3263,6 +3841,11 @@ def parse_args(argv=None):
         help="Personal Access Token (sonst Env TRWL_TOKEN). Braucht write-statuses.",
     )
     parser.add_argument(
+        "--scale", type=float, default=None,
+        help="Zoom der Oberfläche, z.B. 1.5 (Default: zuletzt gewählter Wert, "
+             "beim ersten Start die Systemskalierung). Im Editor: Strg +/−/0.",
+    )
+    parser.add_argument(
         "--login", action="store_true",
         help="OAuth-Login im Browser erzwingen (Scopes read-statuses write-statuses).",
     )
@@ -3430,6 +4013,7 @@ def main(argv=None):
         operator_line_patches_path=args.operator_line_patches,
         operator_replacements_path=args.operator_replacements,
         line_patches_path=args.line_patches,
+        zoom=args.scale, detect=True,
     )
     root.mainloop()
     return 0

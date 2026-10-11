@@ -180,6 +180,10 @@ def main(argv=None):
         "--edit", action="store_true",
         help="Tag-Editor öffnen (Tags und Status-Text live auf Träwelling).",
     )
+    parser.add_argument(
+        "--scale", type=float, default=None,
+        help="Nur mit --edit: Zoom der Editor-Oberfläche, z.B. 1.5.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -235,6 +239,8 @@ def main(argv=None):
             edit_argv.extend(["--since", args.since])
         if args.ignore_plus:
             edit_argv.append("--ignore-plus")
+        if args.scale is not None:
+            edit_argv.extend(["--scale", str(args.scale)])
         edit_argv.extend(["--loc-class-families", args.loc_class_families])
         edit_argv.extend(["--edge-patches", args.edge_patches])
         edit_argv.extend(["--station-patches", args.station_patches])

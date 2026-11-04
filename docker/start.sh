@@ -12,8 +12,15 @@ crontab "$CRON_FILE"
 cd /app
 $PYTHON walita.py --no-open -o /app/srv/index.html
 
-# Start the standard cron scheduler
-cron
+# Start webserver in the background while cron remains in the foreground.
+$PYTHON -m http.server 8080 --directory /app/srv &
+SERVER_PID=$!
 
-# Start webserver
-exec $PYTHON -m http.server 8080 --directory /app/srv
+cleanup() {
+	kill "$SERVER_PID" 2>/dev/null || true
+	wait "$SERVER_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+echo "Starting cron in foreground"
+cron -f -L 15
